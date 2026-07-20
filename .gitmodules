@@ -1,0 +1,6 @@
+[submodule "third_party/highs"]
+	path = third_party/highs
+	url = https://github.com/ERGO-Code/HiGHS.git
+[submodule "third_party/ruckig"]
+	path = third_party/ruckig
+	url = https://github.com/pantor/ruckig.git
