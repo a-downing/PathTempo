@@ -41,6 +41,10 @@ The primary output is a sequence of cubic scalar path-position segments in physi
 
 Coordinate materialization may discover an exact polynomial constraint violation. A caller returns a required time-scale correction for the owning path piece. PathTempo tightens its local velocity, acceleration, and jerk limits and re-solves while retaining reusable HiGHS and Ruckig state. Geometry-tolerance failures that can be repaired by subdividing coordinate cubics do not require a scalar re-solve.
 
+## Implemented extraction boundary
+
+`ScalarTransitionPlanner` is the first functional solver component. It calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation. Multi-piece reachability and the HiGHS-backed sequential convex solve remain to be extracted.
+
 ## Dependencies
 
 HiGHS and Ruckig are unmodified upstream dependencies and remain private to the implementation. Source builds use pinned Git submodules by default. Parent-provided or installed CMake package targets are also supported.

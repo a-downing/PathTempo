@@ -2,13 +2,30 @@
 
 Jerk-limited path timing for fixed geometric paths, with coupled velocity, acceleration, and jerk constraints and cubic time-law output.
 
-PathTempo is an early-stage C++23 library. Its public API is being extracted from a CNC trajectory planner and is not yet stable.
+PathTempo is an early-stage C++23 library. Its public API is being extracted from a CNC trajectory planner and is not yet stable. The scalar transition planner is functional; multi-piece HiGHS timing is the next extraction milestone.
 
 ## Design
 
 PathTempo treats geometry as ordered timing pieces. Each piece supplies its arc length, programmed velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. Every non-empty cubic or quintic spline knot interval creates one piece.
 
 The planner operates on scalar path velocity, acceleration, and jerk while enforcing coupled aggregate and per-coordinate limits. Its primary output is a sequence of scalar path-position cubic polynomials in physical time.
+
+## Scalar transitions
+
+`ScalarTransitionPlanner` calculates a jerk-limited transition over a fixed path distance with specified beginning and ending velocity and acceleration. It owns a reusable Ruckig workspace and returns a fixed-capacity sequence of cubic path-position segments without exposing Ruckig types.
+
+```cpp
+path_tempo::ScalarTransitionPlanner planner;
+auto transition = planner.solve({
+    .piece = 1,
+    .length = 10.0,
+    .beginning = {},
+    .ending = {},
+    .maximumVelocity = 4.0,
+    .maximumAcceleration = 3.0,
+    .maximumJerk = 8.0,
+});
+```
 
 See [docs/design.md](docs/design.md) for the current architecture.
 

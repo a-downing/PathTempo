@@ -34,7 +34,7 @@ function(path_tempo_resolve_dependencies)
             add_subdirectory(third_party/ruckig EXCLUDE_FROM_ALL)
 
             if (WIN32)
-                target_compile_definitions(ruckig PRIVATE _USE_MATH_DEFINES)
+                target_compile_definitions(ruckig PUBLIC _USE_MATH_DEFINES)
             endif()
         else()
             find_package(ruckig CONFIG REQUIRED)
@@ -45,6 +45,7 @@ endfunction()
 path_tempo_resolve_dependencies()
 
 add_library(PathTempo STATIC
+    src/Planner.cpp
     src/Version.cpp)
 add_library(PathTempo::PathTempo ALIAS PathTempo)
 
