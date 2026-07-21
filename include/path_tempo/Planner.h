@@ -9,6 +9,9 @@
 #include "path_tempo/Types.h"
 
 namespace path_tempo {
+    double velocityTransitionDistance(double fromVelocity, double toVelocity, double acceleration, double jerk);
+    double reachableVelocity(double fixedVelocity, double cap, double length, double acceleration, double jerk);
+
     struct ScalarTransitionRequest {
         PathPieceId piece = 0;
         double length = 0.0;

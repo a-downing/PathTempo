@@ -5,6 +5,7 @@
 #include <string_view>
 
 #include "path_tempo/Sampling.h"
+#include "path_tempo/LinearOptimization.h"
 #include "path_tempo/Planner.h"
 #include "path_tempo/Types.h"
 #include "path_tempo/Version.h"
@@ -155,6 +156,54 @@ namespace {
         require(!transition.has_value(), "zero-length transition should be rejected");
         require(transition.error().code == path_tempo::PlanningErrorCode::InvalidInput, "invalid transition should return a typed input error");
     }
+
+    void testPersistentLinearOptimization() {
+        path_tempo::PersistentLinearSolver solver;
+        const auto configured = solver.configure(0.5);
+
+        require(configured.has_value(), "persistent linear solver should configure");
+
+        path_tempo::SparseLinearProgram first(2);
+        first.columnLower(0) = 0.0;
+        first.columnLower(1) = 0.0;
+        first.columnCost(0) = 1.0;
+        first.columnCost(1) = 2.0;
+        first.addRow(3.0, path_tempo::linearProgramInfinity(), {{0, 1.0}, {1, 1.0}});
+        const auto initial = solver.solve(first, {.simplexIterationLimit = 128});
+
+        require(initial.has_value(), "initial linear program should solve");
+        require(initial->status == path_tempo::LinearSolveStatus::Optimal, "initial linear program should be optimal");
+        require(initial->values.size() == 2, "linear solution should contain every column");
+        require(std::abs(initial->values[0] - 3.0) <= 1e-9, "linear solution should select the cheaper first column");
+        require(std::abs(initial->values[1]) <= 1e-9, "linear solution should leave the expensive second column at zero");
+
+        path_tempo::SparseLinearProgram updated(2);
+        updated.columnLower(0) = 0.0;
+        updated.columnLower(1) = 0.0;
+        updated.columnCost(0) = 2.0;
+        updated.columnCost(1) = 1.0;
+        updated.addRow(3.0, path_tempo::linearProgramInfinity(), {{0, 1.0}, {1, 1.0}});
+        const auto resolved = solver.solve(updated, {.simplexIterationLimit = 128});
+
+        require(resolved.has_value(), "updated linear program should solve");
+        require(resolved->status == path_tempo::LinearSolveStatus::Optimal, "updated linear program should be optimal");
+        require(resolved->diagnostics.modelUpdateAttempted, "second structure-stable solve should attempt a model update");
+        require(resolved->diagnostics.modelUpdateApplied, "second structure-stable solve should update the persistent model");
+        require(std::abs(resolved->values[0]) <= 1e-9, "updated solution should leave the expensive first column at zero");
+        require(std::abs(resolved->values[1] - 3.0) <= 1e-9, "updated solution should select the cheaper second column");
+    }
+
+    void testVelocityReachability() {
+        const auto transitionDistance = path_tempo::velocityTransitionDistance(0.0, 2.0, 1.0, 2.0);
+
+        require(std::abs(transitionDistance - 2.5) <= 1e-12, "velocity transition distance should include jerk-limited ramps");
+        require(path_tempo::reachableVelocity(1.0, 0.5, 10.0, 1.0, 2.0) == 0.5, "a lower velocity cap should be immediately reachable");
+
+        const auto reachable = path_tempo::reachableVelocity(0.0, 2.0, 1.0, 1.0, 2.0);
+
+        require(reachable > 0.0 && reachable < 2.0, "a short piece should reduce its reachable velocity cap");
+        require(path_tempo::velocityTransitionDistance(0.0, reachable, 1.0, 2.0) <= 1.0, "reachable velocity should fit within the available distance");
+    }
 }
 
 int main() {
@@ -166,4 +215,6 @@ int main() {
     testMovingBoundaryTransition();
     testUnboundedAccelerationCruise();
     testInvalidTransition();
+    testPersistentLinearOptimization();
+    testVelocityReachability();
 }

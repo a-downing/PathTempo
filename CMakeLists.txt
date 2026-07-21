@@ -45,6 +45,7 @@ endfunction()
 path_tempo_resolve_dependencies()
 
 add_library(PathTempo STATIC
+    src/LinearOptimization.cpp
     src/Planner.cpp
     src/Version.cpp)
 add_library(PathTempo::PathTempo ALIAS PathTempo)

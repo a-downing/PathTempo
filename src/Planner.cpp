@@ -4,11 +4,52 @@
 #include <cassert>
 #include <cmath>
 #include <format>
+#include <numeric>
 #include <utility>
 
 #include <ruckig/ruckig.hpp>
 
 namespace path_tempo {
+    double velocityTransitionDistance(const double fromVelocity, const double toVelocity, const double acceleration, const double jerk) {
+        const auto change = std::abs(toVelocity - fromVelocity);
+
+        if (change <= 1e-15) {
+            return 0.0;
+        }
+
+        const auto threshold = acceleration * acceleration / jerk;
+        const auto duration = change <= threshold ? 2.0 * std::sqrt(change / jerk) : change / acceleration + acceleration / jerk;
+
+        return std::midpoint(fromVelocity, toVelocity) * duration;
+    }
+
+    double reachableVelocity(const double fixedVelocity, const double cap, const double length, const double acceleration, const double jerk) {
+        if (cap <= fixedVelocity) {
+            return cap;
+        }
+
+        const auto available = std::max(0.0, length - std::max(1e-12, length * 1e-6));
+
+        if (velocityTransitionDistance(fixedVelocity, cap, acceleration, jerk) <= available) {
+            return cap;
+        }
+
+        auto low = fixedVelocity;
+        auto high = cap;
+
+        for (unsigned iteration = 0; iteration < 52; ++iteration) {
+            const auto middle = std::midpoint(low, high);
+
+            if (velocityTransitionDistance(fixedVelocity, middle, acceleration, jerk) <= available) {
+                low = middle;
+            } else {
+                high = middle;
+            }
+        }
+
+        return low;
+    }
+
     struct ScalarTransitionPlanner::Implementation {
         ruckig::InputParameter<1> input;
         ruckig::Ruckig<1> generator;

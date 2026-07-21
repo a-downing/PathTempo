@@ -43,7 +43,9 @@ Coordinate materialization may discover an exact polynomial constraint violation
 
 ## Implemented extraction boundary
 
-`ScalarTransitionPlanner` is the first functional solver component. It calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation. Multi-piece reachability and the HiGHS-backed sequential convex solve remain to be extracted.
+`ScalarTransitionPlanner` calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation.
+
+`PersistentLinearSolver` owns HiGHS model storage, structure-stable updates, basis reuse, resource-limit classification, and primal extraction. Callers build a solver-neutral row-wise `SparseLinearProgram`; no HiGHS type crosses the public boundary. Multi-piece reachability, SCP linearization, line search, and materialization correction orchestration remain to be extracted.
 
 ## Dependencies
 

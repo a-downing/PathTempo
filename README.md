@@ -2,7 +2,7 @@
 
 Jerk-limited path timing for fixed geometric paths, with coupled velocity, acceleration, and jerk constraints and cubic time-law output.
 
-PathTempo is an early-stage C++23 library. Its public API is being extracted from a CNC trajectory planner and is not yet stable. The scalar transition planner is functional; multi-piece HiGHS timing is the next extraction milestone.
+PathTempo is an early-stage C++23 library. Its public API is being extracted from a CNC trajectory planner and is not yet stable. Scalar transitions and the persistent sparse linear-optimization backend are functional; moving the remaining multi-piece SCP orchestration is the next extraction milestone.
 
 ## Design
 
@@ -26,6 +26,8 @@ auto transition = planner.solve({
     .maximumJerk = 8.0,
 });
 ```
+
+The solver-neutral `SparseLinearProgram` and `PersistentLinearSolver` types similarly keep HiGHS model, basis, update, and resource-limit details behind PathTempo's implementation boundary.
 
 See [docs/design.md](docs/design.md) for the current architecture.
 
