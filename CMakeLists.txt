@@ -7,33 +7,6 @@ include(CTest)
 
 option(PATH_TEMPO_USE_BUNDLED_DEPENDENCIES "Use the pinned Ruckig submodule" ON)
 
-function(path_tempo_force_o2_in_directory directory)
-    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
-    foreach(target IN LISTS targets)
-        get_target_property(imported ${target} IMPORTED)
-        get_target_property(type ${target} TYPE)
-        get_target_property(o2_enabled ${target} EFFECTIVE_O2_ENABLED)
-        if(NOT imported AND NOT o2_enabled
-           AND (type STREQUAL "EXECUTABLE" OR type STREQUAL "STATIC_LIBRARY"
-                OR type STREQUAL "SHARED_LIBRARY" OR type STREQUAL "MODULE_LIBRARY"
-                OR type STREQUAL "OBJECT_LIBRARY"))
-            if(MSVC)
-                target_compile_options(${target} PRIVATE
-                    "$<$<COMPILE_LANGUAGE:C,CXX>:/O2>")
-            else()
-                target_compile_options(${target} PRIVATE
-                    "$<$<COMPILE_LANGUAGE:C,CXX>:-O2>")
-            endif()
-            set_property(TARGET ${target} PROPERTY EFFECTIVE_O2_ENABLED TRUE)
-        endif()
-    endforeach()
-
-    get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
-    foreach(subdirectory IN LISTS subdirectories)
-        path_tempo_force_o2_in_directory("${subdirectory}")
-    endforeach()
-endfunction()
-
 function(path_tempo_resolve_dependencies)
     if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
         # Keep the implementation dependency static.
@@ -105,11 +78,6 @@ if (MSVC)
 else()
     target_compile_options(path_tempo_continuous_path_example PRIVATE -Wall -Wextra)
 endif()
-
-# Bundled Ruckig is a private implementation dependency, but its Debug default
-# would otherwise be -O0. Apply only the optimization option to
-# every local C/C++ target so Debug and Release both execute at -O2.
-path_tempo_force_o2_in_directory("${CMAKE_CURRENT_SOURCE_DIR}")
 
 configure_package_config_file(
     cmake/PathTempoConfig.cmake.in

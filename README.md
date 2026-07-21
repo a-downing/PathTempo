@@ -89,6 +89,8 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
+PathTempo does not override CMake's configuration-specific optimization flags. Debug retains the toolchain's standard unoptimized behavior, runtime checks, assertions, and symbols; Release, RelWithDebInfo, and MinSizeRel retain their toolchain defaults. Use RelWithDebInfo when profiling optimized code with debug symbols.
+
 ## Continuous-path geometry example
 
 The continuous-path example loads exported line, endpoint-exact arc, cubic B-spline, and quintic B-spline geometry without parsing G-code. It constructs sampled path pieces with the geometry helpers and solves the complete three-coordinate path using the serialized programmed feeds. The source program is retained as `examples/data/continuous_path_reference.ngc` for reference; the example reads `examples/data/continuous_path.txt` and does not parse G-code.
