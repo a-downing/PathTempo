@@ -3,6 +3,7 @@
 #include <array>
 #include <cstddef>
 #include <expected>
+#include <functional>
 #include <memory>
 #include <span>
 #include <string>
@@ -74,6 +75,8 @@ namespace path_tempo {
         PathPlanningDiagnostics diagnostics;
     };
 
+    using MaterializationCorrection = std::function<std::expected<std::vector<PieceCorrection>, std::string>(const PlannedPath &candidate)>;
+
     class ScalarTransition {
         static constexpr std::size_t CAPACITY = 10;
         std::array<CubicTimeSegment, CAPACITY> m_segments {};
@@ -139,7 +142,7 @@ namespace path_tempo {
             std::vector<double> axisJerk;
         };
 
-        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings);
+        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
 
     public:
         PathPlanner();
@@ -150,7 +153,7 @@ namespace path_tempo {
         PathPlanner &operator=(const PathPlanner &) = delete;
 
         template<std::size_t DoF>
-        std::expected<PlannedPath, PlanningError> solve(const PathPlanningRequest<DoF> &request);
+        std::expected<PlannedPath, PlanningError> solve(const PathPlanningRequest<DoF> &request, const MaterializationCorrection &materializationCorrection = {});
     };
 }
 

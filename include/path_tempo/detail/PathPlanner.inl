@@ -6,7 +6,7 @@
 
 namespace path_tempo {
     template<std::size_t DoF>
-    std::expected<PlannedPath, PlanningError> PathPlanner::solve(const PathPlanningRequest<DoF> &request) {
+    std::expected<PlannedPath, PlanningError> PathPlanner::solve(const PathPlanningRequest<DoF> &request, const MaterializationCorrection &materializationCorrection) {
         if (request.pieces.empty()) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::InvalidInput,
@@ -33,6 +33,13 @@ namespace path_tempo {
 
         for (std::size_t pieceIndex = 0; pieceIndex < request.pieces.size(); ++pieceIndex) {
             const auto &piece = request.pieces[pieceIndex];
+
+            if (std::ranges::any_of(localPieces, [&](const LocalPiece &existing) { return existing.id == piece.id; })) {
+                return std::unexpected(PlanningError {
+                    .code = PlanningErrorCode::InvalidInput,
+                    .message = std::format("path piece {} repeats piece ID {}", pieceIndex, piece.id),
+                });
+            }
 
             if (!std::isfinite(piece.length) || piece.length <= 0.0 || !std::isfinite(piece.programmedVelocity) || piece.programmedVelocity <= 0.0 || piece.stations.empty()) {
                 return std::unexpected(PlanningError {
@@ -172,6 +179,6 @@ namespace path_tempo {
             .axisJerk = {request.limits.axisJerk.begin(), request.limits.axisJerk.end()},
         };
 
-        return solveLocal(localPieces, request.beginning, request.ending, coupledLimits, request.settings);
+        return solveLocal(localPieces, request.beginning, request.ending, coupledLimits, request.settings, materializationCorrection);
     }
 }

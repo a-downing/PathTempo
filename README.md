@@ -9,9 +9,10 @@ PathTempo is early-stage software and its public API is not yet stable.
 - fixed-distance scalar transitions with specified beginning and ending velocity and acceleration;
 - fixed-capacity physical-time cubic output for scalar transitions;
 - continuous multi-piece timing for sampled C2 paths;
-- HiGHS-optimized velocity envelopes with jerk-limited forward/backward reachability;
-- HiGHS-backed sequential coupled-acceleration refinement with exact Ruckig line-search acceptance;
+- jerk-limited forward/backward velocity reachability;
+- HiGHS-backed sequential coupled acceleration and full jerk refinement with exact Ruckig line-search acceptance;
 - bounded local correction passes for sampled coupled acceleration and full jerk constraints;
+- caller-provided materialization correction with bounded re-solves;
 - globally positioned scalar cubic output preserving path-piece identity;
 - monotonicity and direction-reversal validation;
 - velocity-transition distance and reachability calculations;
@@ -21,16 +22,17 @@ PathTempo is early-stage software and its public API is not yet stable.
 ## Planned capabilities
 
 - arc, cubic-spline, and quintic-spline construction helpers;
-- continuous geometric proof between differential stations; and
-- materialization-driven correction from coordinate-polynomial extrema.
+- continuous geometric proof between differential stations.
 
 ## Design
 
 PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, programmed velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. Every non-empty cubic or quintic spline knot interval creates one piece.
 
-`PathPlanner` solves ordered pieces with tangent- and curvature-continuous boundaries. It applies programmed velocity plus aggregate and per-coordinate limits, optimizes a squared-velocity envelope through HiGHS, tightens that envelope with jerk-limited reachability, and materializes every piece through Ruckig. Curved candidates are checked at every supplied differential station using complete coupled acceleration and jerk. Violating pieces receive a bounded local time-scale correction and are re-solved. A sequential HiGHS refinement proposes internal velocity and acceleration changes; station-by-station line search accepts them only when adjacent Ruckig transitions remain feasible, constraint-valid, and no slower.
+`PathPlanner` solves ordered pieces with tangent- and curvature-continuous boundaries. It applies programmed velocity plus aggregate and per-coordinate limits, constructs a jerk-limited forward/backward velocity reference, and materializes every piece through Ruckig. Its HiGHS sequential program uses station velocity, acceleration, one-sided scalar jerk, and acceleration-deviation variables with linearized coupled endpoint constraints. Station-by-station line search accepts internal state changes only when adjacent Ruckig transitions remain feasible and no slower. Curved candidates are then checked at every supplied differential station using complete coupled acceleration and jerk. Violating pieces receive a bounded local time-scale correction and are re-solved.
 
 These checks guarantee the supplied differential stations. They do not prove continuous geometric behavior between stations; callers must provide sufficient sampling or perform a later continuous/materialized proof and request correction.
+
+The optional `MaterializationCorrection` callback receives each complete candidate `PlannedPath`. A caller may return per-piece required time scales discovered by coordinate-polynomial extrema or another stronger proof. PathTempo combines them with its sampled corrections, tightens only the affected scalar limits, and repeats the same bounded solve.
 
 ```cpp
 path_tempo::PathPlanner planner;

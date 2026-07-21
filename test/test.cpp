@@ -514,6 +514,55 @@ namespace {
         require(std::abs(last.velocity(last.duration) - ending.velocity) <= 1e-9, "curved planning should preserve ending velocity");
         require(std::abs(last.acceleration(last.duration) - ending.acceleration) <= 1e-9, "curved planning should preserve ending acceleration");
     }
+
+    void testMaterializationCorrectionCallback() {
+        const auto line = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {0.0, 0.0, 0.0},
+            .to = {10.0, 0.0, 0.0},
+        }, 91, 3.0);
+
+        require(line.has_value(), "materialization-correction test line should sample");
+
+        const std::array pieces {line->view()};
+        const path_tempo::PathPlanningRequest<3> request {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        };
+        path_tempo::PathPlanner baselinePlanner;
+        const auto baseline = baselinePlanner.solve(request);
+
+        require(baseline.has_value(), "materialization-correction baseline should solve");
+
+        auto callbackCalls = std::size_t {0};
+        const path_tempo::MaterializationCorrection correction = [&](const auto &candidate) -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
+            ++callbackCalls;
+            require(!candidate.timeLaw.segments.empty(), "materialization callback should receive a complete candidate");
+
+            if (callbackCalls == 1) {
+                return std::vector {path_tempo::PieceCorrection {.piece = 91, .requiredTimeScale = 2.0}};
+            }
+
+            return std::vector<path_tempo::PieceCorrection> {};
+        };
+        path_tempo::PathPlanner correctedPlanner;
+        const auto corrected = correctedPlanner.solve(request, correction);
+
+        require(corrected.has_value(), "a valid materialization correction should re-solve");
+        require(callbackCalls == 2, "materialization correction should receive the corrected candidate");
+        require(corrected->diagnostics.correctedPieces == 1, "materialization correction should retain corrected-piece diagnostics");
+        require(corrected->diagnostics.velocitySeedDuration > baseline->diagnostics.velocitySeedDuration, "a two-times local time scale should slow the corrected path");
+
+        path_tempo::PathPlanner invalidPlanner;
+        const auto invalid = invalidPlanner.solve(request, [](const auto &) -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
+            return std::vector {path_tempo::PieceCorrection {.piece = 999, .requiredTimeScale = 2.0}};
+        });
+
+        require(!invalid.has_value(), "an unknown materialization correction piece should be rejected");
+        require(invalid.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an invalid materialization correction should return an input error");
+    }
 }
 
 int main() {
@@ -533,4 +582,5 @@ int main() {
     testCurvedBoundaryRejectsGeometricJerkViolation();
     testMultiPieceCurvedRefinement();
     testCurvedMovingBoundaryStates();
+    testMaterializationCorrectionCallback();
 }
