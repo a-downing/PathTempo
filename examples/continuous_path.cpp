@@ -415,14 +415,14 @@ namespace {
 
 int main(const int argc, char **argv) {
     if (argc > 2) {
-        std::println(stderr, "usage: path_tempo_adaptive_pockets_example [geometry.txt]");
+        std::println(stderr, "usage: path_tempo_continuous_path_example [geometry.txt]");
 
         return 2;
     }
 
     const auto path = argc == 2
         ? std::filesystem::path {argv[1]}
-        : std::filesystem::path {PATH_TEMPO_EXAMPLE_DATA_DIR} / "adaptive_pockets.1.txt";
+        : std::filesystem::path {PATH_TEMPO_EXAMPLE_DATA_DIR} / "continuous_path.txt";
 
     auto geometry = path_tempo::example::loadGeometryFile(path);
     if (!geometry) {

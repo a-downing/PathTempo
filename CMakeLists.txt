@@ -93,17 +93,17 @@ if (BUILD_TESTING)
     add_test(NAME path_tempo_tests COMMAND path_tempo_tests)
 endif()
 
-add_executable(path_tempo_adaptive_pockets_example EXCLUDE_FROM_ALL
-    examples/adaptive_pockets.cpp
+add_executable(path_tempo_continuous_path_example EXCLUDE_FROM_ALL
+    examples/continuous_path.cpp
     examples/geometry_text_loader.cpp)
-target_link_libraries(path_tempo_adaptive_pockets_example PRIVATE PathTempo::PathTempo)
-target_compile_definitions(path_tempo_adaptive_pockets_example PRIVATE
+target_link_libraries(path_tempo_continuous_path_example PRIVATE PathTempo::PathTempo)
+target_compile_definitions(path_tempo_continuous_path_example PRIVATE
     PATH_TEMPO_EXAMPLE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/data")
 
 if (MSVC)
-    target_compile_options(path_tempo_adaptive_pockets_example PRIVATE /W4)
+    target_compile_options(path_tempo_continuous_path_example PRIVATE /W4)
 else()
-    target_compile_options(path_tempo_adaptive_pockets_example PRIVATE -Wall -Wextra)
+    target_compile_options(path_tempo_continuous_path_example PRIVATE -Wall -Wextra)
 endif()
 
 # Bundled Ruckig is a private implementation dependency, but its Debug default

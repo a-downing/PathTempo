@@ -89,16 +89,16 @@ cmake --build build
 ctest --test-dir build --output-on-failure
 ```
 
-## Adaptive-pockets example
+## Continuous-path geometry example
 
-The adaptive-pockets example loads exported line, endpoint-exact arc, cubic B-spline, and quintic B-spline geometry without parsing G-code. It constructs sampled path pieces with the geometry helpers and solves the complete three-coordinate path using the serialized programmed feeds. The original `examples/data/adaptive_pockets.ngc` file is included only as a reference; the example reads `examples/data/adaptive_pockets.1.txt` and does not parse G-code.
+The continuous-path example loads exported line, endpoint-exact arc, cubic B-spline, and quintic B-spline geometry without parsing G-code. It constructs sampled path pieces with the geometry helpers and solves the complete three-coordinate path using the serialized programmed feeds. The source program is retained as `examples/data/continuous_path_reference.ngc` for reference; the example reads `examples/data/continuous_path.txt` and does not parse G-code.
 
 ```powershell
-cmake --build build --target path_tempo_adaptive_pockets_example
-.\build\path_tempo_adaptive_pockets_example.exe
+cmake --build build --target path_tempo_continuous_path_example
+.\build\path_tempo_continuous_path_example.exe
 ```
 
-The executable uses `examples/data/adaptive_pockets.1.txt` by default. A different geometry file can be passed as its only argument. The full example intentionally remains outside the default build and test suite because it is a large planning problem.
+The executable uses `examples/data/continuous_path.txt` by default. A different geometry file can be passed as its only argument. The full example intentionally remains outside the default build and test suite because it is a large planning problem.
 
 The example uses the default planning settings. `applySampledCorrections` defaults to `true`; after each candidate is built, PathTempo checks the supplied differential stations and requests per-piece time scaling for sampled coupled-limit violations. Set it to `false` to skip those checks. `maximumCorrectionPasses`, which defaults to 8, bounds the candidate-and-correction loop shared by sampled corrections and the optional `MaterializationCorrection` callback. It must be positive. A value of one does not disable correction: if the first candidate requests a correction, PathTempo applies the tighter limits but then reports non-convergence because no pass remains to solve them. `diagnostics.correctionPasses` counts candidate passes, so a value of one means that the initial candidate required no additional correction solve.
 
