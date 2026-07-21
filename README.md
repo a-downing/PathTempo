@@ -1,14 +1,31 @@
 # PathTempo
 
-Jerk-limited path timing for fixed geometric paths, with coupled velocity, acceleration, and jerk constraints and cubic time-law output.
+C++23 building blocks for jerk-limited timing of fixed geometric paths.
 
-PathTempo is an early-stage C++23 library. Its public API is being extracted from a CNC trajectory planner and is not yet stable. Scalar transitions and the persistent sparse linear-optimization backend are functional; moving the remaining multi-piece SCP orchestration is the next extraction milestone.
+PathTempo is early-stage software and its public API is not yet stable.
+
+## Current capabilities
+
+- fixed-distance scalar transitions with specified beginning and ending velocity and acceleration;
+- fixed-capacity physical-time cubic output for scalar transitions;
+- monotonicity and direction-reversal validation;
+- velocity-transition distance and reachability calculations;
+- line sampling into differential constraint stations; and
+- a solver-neutral sparse linear-program interface with persistent HiGHS model updates, basis reuse, resource-limit classification, and primal extraction.
+
+## Planned capabilities
+
+- multi-piece timing with coupled path and per-coordinate velocity, acceleration, and jerk constraints;
+- line, arc, cubic-spline, and quintic-spline construction helpers;
+- HiGHS-backed sequential convex planning and line search;
+- materialization-driven local correction passes; and
+- complete scalar cubic time laws spanning an ordered path.
 
 ## Design
 
-PathTempo treats geometry as ordered timing pieces. Each piece supplies its arc length, programmed velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. Every non-empty cubic or quintic spline knot interval creates one piece.
+PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, programmed velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. Every non-empty cubic or quintic spline knot interval creates one piece.
 
-The planner operates on scalar path velocity, acceleration, and jerk while enforcing coupled aggregate and per-coordinate limits. Its primary output is a sequence of scalar path-position cubic polynomials in physical time.
+The planned multi-piece solver will operate on scalar path velocity, acceleration, and jerk while enforcing coupled aggregate and per-coordinate limits. Its output will be scalar path-position cubic polynomials in physical time.
 
 ## Scalar transitions
 
@@ -72,6 +89,8 @@ From an installed package:
 find_package(PathTempo CONFIG REQUIRED)
 target_link_libraries(application PRIVATE PathTempo::PathTempo)
 ```
+
+Installed-package consumption currently requires compatible HiGHS and Ruckig CMake packages to be installed separately.
 
 ## License
 

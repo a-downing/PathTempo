@@ -2,9 +2,9 @@
 
 ## Scope
 
-PathTempo computes jerk-limited scalar timing for a fixed geometric path. It does not interpret G-code, construct CNC blends, own presentation metadata, packetize trajectories for a motion backend, or expose solver dependency types.
+PathTempo is designed to compute jerk-limited scalar timing for a fixed geometric path without exposing solver dependency types.
 
-The library owns:
+The target architecture includes:
 
 - generic fixed-degree-of-freedom path timing types;
 - differential constraint stations;
@@ -37,15 +37,17 @@ A planning window begins and ends with scalar velocity and acceleration. Positio
 
 ## Output and correction
 
-The primary output is a sequence of cubic scalar path-position segments in physical time. Every segment belongs to exactly one path piece.
+The planned multi-piece output is a sequence of cubic scalar path-position segments in physical time. Every segment belongs to exactly one path piece.
 
-Coordinate materialization may discover an exact polynomial constraint violation. A caller returns a required time-scale correction for the owning path piece. PathTempo tightens its local velocity, acceleration, and jerk limits and re-solves while retaining reusable HiGHS and Ruckig state. Geometry-tolerance failures that can be repaired by subdividing coordinate cubics do not require a scalar re-solve.
+Coordinate materialization may discover an exact polynomial constraint violation. The planned correction interface allows a caller to return a required time-scale correction for the owning path piece. PathTempo will tighten its local velocity, acceleration, and jerk limits and re-solve while retaining reusable HiGHS and Ruckig state. Geometry-tolerance failures that can be repaired by subdividing coordinate cubics will not require a scalar re-solve.
 
-## Implemented extraction boundary
+## Current implementation
 
 `ScalarTransitionPlanner` calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation.
 
-`PersistentLinearSolver` owns HiGHS model storage, structure-stable updates, basis reuse, resource-limit classification, and primal extraction. Callers build a solver-neutral row-wise `SparseLinearProgram`; no HiGHS type crosses the public boundary. Multi-piece reachability, SCP linearization, line search, and materialization correction orchestration remain to be extracted.
+`PersistentLinearSolver` owns HiGHS model storage, structure-stable updates, basis reuse, resource-limit classification, and primal extraction. Callers build a solver-neutral row-wise `SparseLinearProgram`; no HiGHS type crosses the public boundary.
+
+Velocity-transition distance and reachable-velocity helpers are implemented. Multi-piece planning, coupled-constraint linearization, line search, and materialization correction orchestration are not yet implemented.
 
 ## Dependencies
 
