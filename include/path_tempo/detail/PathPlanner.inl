@@ -187,7 +187,10 @@ namespace path_tempo {
                     if (std::abs(previous.curvature[axis] - current.curvature[axis]) > detail::CURVATURE_CONTINUITY_TOLERANCE) {
                         return std::unexpected(PlanningError {
                             .code = PlanningErrorCode::InvalidInput,
-                            .message = std::format("path pieces {} and {} are not curvature-continuous", pieceIndex - 1, pieceIndex),
+                            .message = std::format(
+                                "path pieces {} and {} are not curvature-continuous on axis {}: previous={} current={} difference={} tolerance={}",
+                                pieceIndex - 1, pieceIndex, axis, previous.curvature[axis], current.curvature[axis],
+                                std::abs(previous.curvature[axis] - current.curvature[axis]), detail::CURVATURE_CONTINUITY_TOLERANCE),
                         });
                     }
                 }

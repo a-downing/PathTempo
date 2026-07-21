@@ -251,6 +251,8 @@ namespace path_tempo {
             }
         }
 
+        // HiGHS otherwise applies its time limit to cumulative runtime across repeated calls.
+        solver.zeroAllClocks();
         const auto solveStatus = solver.run();
         const auto &solveInfo = solver.getInfo();
 

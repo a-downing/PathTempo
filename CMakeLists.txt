@@ -7,6 +7,33 @@ include(CTest)
 
 option(PATH_TEMPO_USE_BUNDLED_DEPENDENCIES "Use the pinned HiGHS and Ruckig submodules" ON)
 
+function(path_tempo_force_o2_in_directory directory)
+    get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
+    foreach(target IN LISTS targets)
+        get_target_property(imported ${target} IMPORTED)
+        get_target_property(type ${target} TYPE)
+        get_target_property(o2_enabled ${target} EFFECTIVE_O2_ENABLED)
+        if(NOT imported AND NOT o2_enabled
+           AND (type STREQUAL "EXECUTABLE" OR type STREQUAL "STATIC_LIBRARY"
+                OR type STREQUAL "SHARED_LIBRARY" OR type STREQUAL "MODULE_LIBRARY"
+                OR type STREQUAL "OBJECT_LIBRARY"))
+            if(MSVC)
+                target_compile_options(${target} PRIVATE
+                    "$<$<COMPILE_LANGUAGE:C,CXX>:/O2>")
+            else()
+                target_compile_options(${target} PRIVATE
+                    "$<$<COMPILE_LANGUAGE:C,CXX>:-O2>")
+            endif()
+            set_property(TARGET ${target} PROPERTY EFFECTIVE_O2_ENABLED TRUE)
+        endif()
+    endforeach()
+
+    get_property(subdirectories DIRECTORY "${directory}" PROPERTY SUBDIRECTORIES)
+    foreach(subdirectory IN LISTS subdirectories)
+        path_tempo_force_o2_in_directory("${subdirectory}")
+    endforeach()
+endfunction()
+
 function(path_tempo_resolve_dependencies)
     if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
         # Keep implementation dependencies static and avoid HiGHS enabling
@@ -67,9 +94,9 @@ target_link_libraries(PathTempo
         ruckig::ruckig)
 
 if (MSVC)
-    target_compile_options(PathTempo PRIVATE /W4 /O2)
+    target_compile_options(PathTempo PRIVATE /W4)
 else()
-    target_compile_options(PathTempo PRIVATE -Wall -Wextra -O2)
+    target_compile_options(PathTempo PRIVATE -Wall -Wextra)
 endif()
 
 if (BUILD_TESTING)
@@ -77,13 +104,31 @@ if (BUILD_TESTING)
     target_link_libraries(path_tempo_tests PRIVATE PathTempo::PathTempo)
 
     if (MSVC)
-        target_compile_options(path_tempo_tests PRIVATE /W4 /O2)
+        target_compile_options(path_tempo_tests PRIVATE /W4)
     else()
-        target_compile_options(path_tempo_tests PRIVATE -Wall -Wextra -O2)
+        target_compile_options(path_tempo_tests PRIVATE -Wall -Wextra)
     endif()
 
     add_test(NAME path_tempo_tests COMMAND path_tempo_tests)
 endif()
+
+add_executable(path_tempo_adaptive_pockets_example EXCLUDE_FROM_ALL
+    examples/adaptive_pockets.cpp
+    examples/geometry_text_loader.cpp)
+target_link_libraries(path_tempo_adaptive_pockets_example PRIVATE PathTempo::PathTempo)
+target_compile_definitions(path_tempo_adaptive_pockets_example PRIVATE
+    PATH_TEMPO_EXAMPLE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/data")
+
+if (MSVC)
+    target_compile_options(path_tempo_adaptive_pockets_example PRIVATE /W4)
+else()
+    target_compile_options(path_tempo_adaptive_pockets_example PRIVATE -Wall -Wextra)
+endif()
+
+# Bundled HiGHS and Ruckig are private implementation dependencies, but their
+# Debug defaults would otherwise be -O0. Apply only the optimization option to
+# every local C/C++ target so Debug and Release both execute at -O2.
+path_tempo_force_o2_in_directory("${CMAKE_CURRENT_SOURCE_DIR}")
 
 configure_package_config_file(
     cmake/PathTempoConfig.cmake.in
