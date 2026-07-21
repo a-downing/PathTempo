@@ -9,6 +9,8 @@
 #include <vector>
 
 namespace path_tempo {
+    // Coefficients below this magnitude are numerical debris relative to the
+    // normalized planner models and needlessly degrade sparse solver conditioning.
     inline constexpr double SMALL_MATRIX_VALUE = 1e-12;
 
     constexpr bool retainsMatrixCoefficient(const double value) {

@@ -21,18 +21,20 @@ PathTempo is early-stage software and its public API is not yet stable.
 
 ## Planned capabilities
 
-- arc, cubic-spline, and quintic-spline construction helpers;
+- arc, cubic-spline, and quintic-spline construction helpers with explicit sampling counts;
 - continuous geometric proof between differential stations.
 
 ## Design
 
-PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, programmed velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. Every non-empty cubic or quintic spline knot interval creates one piece.
+PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, maximum velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. For a B-spline, callers normally create one piece for each non-empty knot interval; the knot vector may be clamped or unclamped and uniform or non-uniform.
 
-`PathPlanner` solves ordered pieces with tangent- and curvature-continuous boundaries. It applies programmed velocity plus aggregate and per-coordinate limits, constructs a jerk-limited forward/backward velocity reference, and materializes every piece through Ruckig. Its HiGHS sequential program uses station velocity, acceleration, one-sided scalar jerk, and acceleration-deviation variables with linearized coupled endpoint constraints. Station-by-station line search accepts internal state changes only when adjacent Ruckig transitions remain feasible and no slower. Curved candidates are then checked at every supplied differential station using complete coupled acceleration and jerk. Violating pieces receive a bounded local time-scale correction and are re-solved.
+`PathPlanner` solves ordered pieces with tangent- and curvature-continuous boundaries. It applies each piece's maximum velocity plus aggregate and per-coordinate limits, constructs a jerk-limited forward/backward velocity reference, and materializes every piece through Ruckig. Its HiGHS sequential program uses station velocity, acceleration, one-sided scalar jerk, and acceleration-deviation variables with linearized coupled endpoint constraints. Station-by-station line search accepts internal state changes only when adjacent Ruckig transitions remain feasible and no slower. Curved candidates are then checked at every supplied differential station using complete coupled acceleration and jerk. Violating pieces receive a bounded local time-scale correction and are re-solved. The result reports the effective velocity, acceleration, and jerk limits used for each piece after those corrections.
 
 These checks guarantee the supplied differential stations. They do not prove continuous geometric behavior between stations; callers must provide sufficient sampling or perform a later continuous/materialized proof and request correction.
 
-The optional `MaterializationCorrection` callback receives each complete candidate `PlannedPath`. A caller may return per-piece required time scales discovered by coordinate-polynomial extrema or another stronger proof. PathTempo combines them with its sampled corrections, tightens only the affected scalar limits, and repeats the same bounded solve.
+`PathPlanningSettings::applySampledCorrections` defaults to `true`. A caller may disable it only when a stronger materialization proof checks the complete emitted coordinate polynomials and re-solves with per-piece corrections. PathTempo caches exact-key scalar line-search candidates, including failures, and rematerializes accepted cached durations through Ruckig before publishing them.
+
+The optional `MaterializationCorrection` callback receives each complete candidate `PlannedPath`. A caller may return per-piece required time scales discovered by coordinate-polynomial extrema or another stronger proof. PathTempo combines them with any enabled sampled corrections, tightens only the affected scalar limits, and repeats the same bounded solve.
 
 ```cpp
 path_tempo::PathPlanner planner;

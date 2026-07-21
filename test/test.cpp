@@ -14,6 +14,26 @@
 #include "path_tempo/Version.h"
 
 namespace {
+    // Closed-form line and transition inputs should agree to near machine
+    // precision; this allowance covers only ordinary arithmetic roundoff.
+    constexpr double ANALYTIC_RESULT_TOLERANCE = 1e-12;
+    // Ruckig reconstructs boundary states through several polynomial phases,
+    // so endpoint assertions allow modest accumulated solver roundoff.
+    constexpr double SOLVER_ENDPOINT_TOLERANCE = 1e-9;
+    // Multi-piece and refined paths accumulate error across many phases; this
+    // remains tight enough to expose a visible continuity defect.
+    constexpr double TIME_LAW_CONTINUITY_TOLERANCE = 1e-8;
+    // Coupled limits are sampled after several transformations, so allow a
+    // small relative margin beyond the stricter planner-side feasibility check.
+    constexpr double SAMPLED_LIMIT_RELATIVE_TOLERANCE = 1e-8;
+    // Boundary-limit assertions need only absorb the planner's relative
+    // constraint-comparison roundoff.
+    constexpr double BOUNDARY_LIMIT_TOLERANCE = 1e-10;
+    // Treat jerk below this scale as zero before dividing to locate an extremum.
+    constexpr double JERK_ZERO_TOLERANCE = 1e-15;
+    // Station association compares independently evaluated path distances.
+    constexpr double STATION_MATCH_TOLERANCE = 1e-10;
+
     void require(const bool condition, const std::string_view message) {
         if (!condition) {
             std::cerr << message << '\n';
@@ -26,16 +46,16 @@ namespace {
             .from = {0.0, 0.0, 0.0},
             .to = {3.0, 4.0, 0.0},
         };
-        const auto sampled = path_tempo::sampleLine(line, 7, 2.0, {.intervals = 4});
+        const auto sampled = path_tempo::sampleLine(line, 7, 2.0);
 
         require(sampled.has_value(), "line sampling should succeed");
         require(sampled->id == 7, "line sampling should preserve piece identity");
-        require(std::abs(sampled->length - 5.0) <= 1e-12, "line sampling should calculate length");
-        require(sampled->stations.size() == 5, "four intervals should produce five samples");
+        require(std::abs(sampled->length - 5.0) <= ANALYTIC_RESULT_TOLERANCE, "line sampling should calculate length");
+        require(sampled->stations.size() == 2, "a line should require only its endpoint samples");
         require(sampled->stations.front().distance == 0.0, "first sample should begin at zero");
         require(sampled->stations.back().distance == sampled->length, "last sample should end at piece length");
-        require(std::abs(sampled->stations.front().tangent[0] - 0.6) <= 1e-12, "line tangent X should be normalized");
-        require(std::abs(sampled->stations.front().tangent[1] - 0.8) <= 1e-12, "line tangent Y should be normalized");
+        require(std::abs(sampled->stations.front().tangent[0] - 0.6) <= ANALYTIC_RESULT_TOLERANCE, "line tangent X should be normalized");
+        require(std::abs(sampled->stations.front().tangent[1] - 0.8) <= ANALYTIC_RESULT_TOLERANCE, "line tangent Y should be normalized");
     }
 
     void testLineSamplingErrors() {
@@ -45,8 +65,8 @@ namespace {
         };
         auto invalidVelocity = path_tempo::sampleLine(line, 1, 0.0);
 
-        require(!invalidVelocity.has_value(), "line sampling should reject zero programmed velocity");
-        require(invalidVelocity.error() == path_tempo::SamplingError::InvalidProgrammedVelocity, "zero programmed velocity should have a specific error");
+        require(!invalidVelocity.has_value(), "line sampling should reject a zero maximum velocity");
+        require(invalidVelocity.error() == path_tempo::SamplingError::InvalidMaxVelocity, "a zero maximum velocity should have a specific error");
 
         auto nonFiniteLine = line;
         nonFiniteLine.to[0] = std::numeric_limits<double>::infinity();
@@ -88,19 +108,19 @@ namespace {
         require(!transition->empty(), "rest-to-rest transition should contain cubic segments");
         require(transition->duration() > 0.0, "rest-to-rest transition should have positive duration");
         require(transition->front().piece == 12, "transition segments should preserve piece identity");
-        require(std::abs(transition->front().position(0.0)) <= 1e-12, "transition should start at zero distance");
-        require(std::abs(transition->front().velocity(0.0)) <= 1e-12, "transition should start at rest");
+        require(std::abs(transition->front().position(0.0)) <= ANALYTIC_RESULT_TOLERANCE, "transition should start at zero distance");
+        require(std::abs(transition->front().velocity(0.0)) <= ANALYTIC_RESULT_TOLERANCE, "transition should start at rest");
 
         const auto &last = transition->back();
-        require(std::abs(last.position(last.duration) - 10.0) <= 1e-9, "transition should reach its requested distance");
-        require(std::abs(last.velocity(last.duration)) <= 1e-9, "transition should end at rest");
-        require(std::abs(last.acceleration(last.duration)) <= 1e-9, "transition should end at zero acceleration");
+        require(std::abs(last.position(last.duration) - 10.0) <= SOLVER_ENDPOINT_TOLERANCE, "transition should reach its requested distance");
+        require(std::abs(last.velocity(last.duration)) <= SOLVER_ENDPOINT_TOLERANCE, "transition should end at rest");
+        require(std::abs(last.acceleration(last.duration)) <= SOLVER_ENDPOINT_TOLERANCE, "transition should end at zero acceleration");
 
         auto previousDistance = 0.0;
 
         for (const auto &segment : *transition) {
             require(segment.duration > 0.0, "every transition segment should have positive duration");
-            require(std::abs(segment.position(0.0) - previousDistance) <= 1e-9, "transition segments should be position-continuous");
+            require(std::abs(segment.position(0.0) - previousDistance) <= SOLVER_ENDPOINT_TOLERANCE, "transition segments should be position-continuous");
             previousDistance = segment.position(segment.duration);
         }
     }
@@ -118,13 +138,13 @@ namespace {
         });
 
         require(transition.has_value(), "moving-boundary transition should solve");
-        require(std::abs(transition->front().velocity(0.0) - 0.5) <= 1e-12, "transition should preserve initial velocity");
-        require(std::abs(transition->front().acceleration(0.0) - 0.25) <= 1e-12, "transition should preserve initial acceleration");
+        require(std::abs(transition->front().velocity(0.0) - 0.5) <= ANALYTIC_RESULT_TOLERANCE, "transition should preserve initial velocity");
+        require(std::abs(transition->front().acceleration(0.0) - 0.25) <= ANALYTIC_RESULT_TOLERANCE, "transition should preserve initial acceleration");
 
         const auto &last = transition->back();
-        require(std::abs(last.position(last.duration) - 2.5) <= 1e-9, "moving-boundary transition should reach its distance");
-        require(std::abs(last.velocity(last.duration) - 0.75) <= 1e-9, "moving-boundary transition should reach its final velocity");
-        require(std::abs(last.acceleration(last.duration) + 0.1) <= 1e-9, "moving-boundary transition should reach its final acceleration");
+        require(std::abs(last.position(last.duration) - 2.5) <= SOLVER_ENDPOINT_TOLERANCE, "moving-boundary transition should reach its distance");
+        require(std::abs(last.velocity(last.duration) - 0.75) <= SOLVER_ENDPOINT_TOLERANCE, "moving-boundary transition should reach its final velocity");
+        require(std::abs(last.acceleration(last.duration) + 0.1) <= SOLVER_ENDPOINT_TOLERANCE, "moving-boundary transition should reach its final acceleration");
     }
 
     void testUnboundedAccelerationCruise() {
@@ -177,8 +197,8 @@ namespace {
         require(initial.has_value(), "initial linear program should solve");
         require(initial->status == path_tempo::LinearSolveStatus::Optimal, "initial linear program should be optimal");
         require(initial->values.size() == 2, "linear solution should contain every column");
-        require(std::abs(initial->values[0] - 3.0) <= 1e-9, "linear solution should select the cheaper first column");
-        require(std::abs(initial->values[1]) <= 1e-9, "linear solution should leave the expensive second column at zero");
+        require(std::abs(initial->values[0] - 3.0) <= SOLVER_ENDPOINT_TOLERANCE, "linear solution should select the cheaper first column");
+        require(std::abs(initial->values[1]) <= SOLVER_ENDPOINT_TOLERANCE, "linear solution should leave the expensive second column at zero");
 
         path_tempo::SparseLinearProgram updated(2);
         updated.columnLower(0) = 0.0;
@@ -192,14 +212,14 @@ namespace {
         require(resolved->status == path_tempo::LinearSolveStatus::Optimal, "updated linear program should be optimal");
         require(resolved->diagnostics.modelUpdateAttempted, "second structure-stable solve should attempt a model update");
         require(resolved->diagnostics.modelUpdateApplied, "second structure-stable solve should update the persistent model");
-        require(std::abs(resolved->values[0]) <= 1e-9, "updated solution should leave the expensive first column at zero");
-        require(std::abs(resolved->values[1] - 3.0) <= 1e-9, "updated solution should select the cheaper second column");
+        require(std::abs(resolved->values[0]) <= SOLVER_ENDPOINT_TOLERANCE, "updated solution should leave the expensive first column at zero");
+        require(std::abs(resolved->values[1] - 3.0) <= SOLVER_ENDPOINT_TOLERANCE, "updated solution should select the cheaper second column");
     }
 
     void testVelocityReachability() {
         const auto transitionDistance = path_tempo::velocityTransitionDistance(0.0, 2.0, 1.0, 2.0);
 
-        require(std::abs(transitionDistance - 2.5) <= 1e-12, "velocity transition distance should include jerk-limited ramps");
+        require(std::abs(transitionDistance - 2.5) <= ANALYTIC_RESULT_TOLERANCE, "velocity transition distance should include jerk-limited ramps");
         require(path_tempo::reachableVelocity(1.0, 0.5, 10.0, 1.0, 2.0) == 0.5, "a lower velocity cap should be immediately reachable");
 
         const auto reachable = path_tempo::reachableVelocity(0.0, 2.0, 1.0, 1.0, 2.0);
@@ -212,9 +232,9 @@ namespace {
         return {
             .pathAcceleration = 2.0,
             .pathJerk = 5.0,
-            .axisVelocity = {4.0, 4.0, 4.0},
-            .axisAcceleration = {2.0, 2.0, 2.0},
-            .axisJerk = {5.0, 5.0, 5.0},
+            .coordinateVelocity = {4.0, 4.0, 4.0},
+            .coordinateAcceleration = {2.0, 2.0, 2.0},
+            .coordinateJerk = {5.0, 5.0, 5.0},
         };
     }
 
@@ -243,8 +263,10 @@ namespace {
         require(planned.has_value(), "a continuous two-piece line path should solve");
         require(!planned->timeLaw.segments.empty(), "multi-piece planning should produce cubic segments");
         require(planned->pieceBoundaries.size() == 3, "two pieces should produce three boundary states");
+        require(planned->pieceLimits.size() == pieces.size(), "multi-piece planning should report one effective limit set per piece");
+        require(planned->pieceLimits[0].velocity <= 3.0 && planned->pieceLimits[1].velocity <= 1.5, "effective piece limits should retain input maximum velocities");
         require(planned->pieceBoundaries[1].velocity > 0.0, "continuous planning should retain motion at an internal boundary");
-        require(planned->pieceBoundaries[1].velocity <= 1.5 + 1e-10, "an internal boundary should honor both programmed velocities");
+        require(planned->pieceBoundaries[1].velocity <= 1.5 + BOUNDARY_LIMIT_TOLERANCE, "an internal boundary should honor both piece maximum velocities");
         require(planned->diagnostics.velocitySeedDuration > 0.0, "multi-piece planning should report its materialized duration");
 
         auto previousDistance = 0.0;
@@ -254,15 +276,15 @@ namespace {
         auto sawSecondPiece = false;
 
         for (const auto &segment : planned->timeLaw.segments) {
-            require(std::abs(segment.position(0.0) - previousDistance) <= 1e-8, "multi-piece cubics should be globally position-continuous");
-            require(std::abs(segment.velocity(0.0) - previousVelocity) <= 1e-8, "multi-piece cubics should be velocity-continuous");
-            require(std::abs(segment.acceleration(0.0) - previousAcceleration) <= 1e-8, "multi-piece cubics should be acceleration-continuous");
-            require(std::abs(segment.jerk()) <= 5.0 + 1e-10, "multi-piece cubics should obey the scalar and axis jerk limit");
+            require(std::abs(segment.position(0.0) - previousDistance) <= TIME_LAW_CONTINUITY_TOLERANCE, "multi-piece cubics should be globally position-continuous");
+            require(std::abs(segment.velocity(0.0) - previousVelocity) <= TIME_LAW_CONTINUITY_TOLERANCE, "multi-piece cubics should be velocity-continuous");
+            require(std::abs(segment.acceleration(0.0) - previousAcceleration) <= TIME_LAW_CONTINUITY_TOLERANCE, "multi-piece cubics should be acceleration-continuous");
+            require(std::abs(segment.jerk()) <= 5.0 + BOUNDARY_LIMIT_TOLERANCE, "multi-piece cubics should obey the scalar and coordinate jerk limit");
 
-            const auto maximumProgrammedVelocity = segment.piece == 31 ? 3.0 : 1.5;
+            const auto pieceMaxVelocity = segment.piece == 31 ? 3.0 : 1.5;
             auto maximumSegmentVelocity = std::max(segment.velocity(0.0), segment.velocity(segment.duration));
 
-            if (std::abs(segment.jerk()) > 1e-15) {
+            if (std::abs(segment.jerk()) > JERK_ZERO_TOLERANCE) {
                 const auto velocityExtremum = -segment.acceleration(0.0) / segment.jerk();
 
                 if (velocityExtremum > 0.0 && velocityExtremum < segment.duration) {
@@ -270,8 +292,8 @@ namespace {
                 }
             }
 
-            require(maximumSegmentVelocity <= maximumProgrammedVelocity + 1e-9, "multi-piece cubics should obey each programmed velocity");
-            require(std::abs(segment.acceleration(0.0)) <= 2.0 + 1e-9 && std::abs(segment.acceleration(segment.duration)) <= 2.0 + 1e-9, "multi-piece cubics should obey the scalar and axis acceleration limit");
+            require(maximumSegmentVelocity <= pieceMaxVelocity + SOLVER_ENDPOINT_TOLERANCE, "multi-piece cubics should obey each piece maximum velocity");
+            require(std::abs(segment.acceleration(0.0)) <= 2.0 + SOLVER_ENDPOINT_TOLERANCE && std::abs(segment.acceleration(segment.duration)) <= 2.0 + SOLVER_ENDPOINT_TOLERANCE, "multi-piece cubics should obey the scalar and coordinate acceleration limit");
 
             previousDistance = segment.position(segment.duration);
             previousVelocity = segment.velocity(segment.duration);
@@ -281,9 +303,9 @@ namespace {
         }
 
         require(sawFirstPiece && sawSecondPiece, "multi-piece segments should preserve each piece identity");
-        require(std::abs(previousDistance - 20.0) <= 1e-8, "multi-piece planning should cover the complete path distance");
-        require(std::abs(previousVelocity) <= 1e-8, "rest-to-rest multi-piece planning should end at rest");
-        require(std::abs(previousAcceleration) <= 1e-8, "rest-to-rest multi-piece planning should end at zero acceleration");
+        require(std::abs(previousDistance - 20.0) <= TIME_LAW_CONTINUITY_TOLERANCE, "multi-piece planning should cover the complete path distance");
+        require(std::abs(previousVelocity) <= TIME_LAW_CONTINUITY_TOLERANCE, "rest-to-rest multi-piece planning should end at rest");
+        require(std::abs(previousAcceleration) <= TIME_LAW_CONTINUITY_TOLERANCE, "rest-to-rest multi-piece planning should end at zero acceleration");
 
         const auto replanned = planner.solve(path_tempo::PathPlanningRequest<3> {
             .pieces = pieces,
@@ -323,12 +345,12 @@ namespace {
         require(planned.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a tangent discontinuity should be an input error");
     }
 
-    path_tempo::SampledPathPiece<3> sampledUnitCircleInterval(const path_tempo::PathPieceId id, const double fromAngle, const double toAngle, const double programmedVelocity, const std::size_t intervals = 32) {
+    path_tempo::SampledPathPiece<3> sampledUnitCircleInterval(const path_tempo::PathPieceId id, const double fromAngle, const double toAngle, const double maxVelocity, const std::size_t intervals = 32) {
         const auto length = toAngle - fromAngle;
         path_tempo::SampledPathPiece<3> piece {
             .id = id,
             .length = length,
-            .programmedVelocity = programmedVelocity,
+            .maxVelocity = maxVelocity,
             .initialLimits = {},
             .stations = {},
         };
@@ -348,8 +370,8 @@ namespace {
         return piece;
     }
 
-    path_tempo::SampledPathPiece<3> sampledQuarterCircle(const path_tempo::PathPieceId id, const double programmedVelocity, const std::size_t intervals = 32) {
-        return sampledUnitCircleInterval(id, 0.0, std::numbers::pi / 2.0, programmedVelocity, intervals);
+    path_tempo::SampledPathPiece<3> sampledQuarterCircle(const path_tempo::PathPieceId id, const double maxVelocity, const std::size_t intervals = 32) {
+        return sampledUnitCircleInterval(id, 0.0, std::numbers::pi / 2.0, maxVelocity, intervals);
     }
 
     void testCurvedPathPlanning() {
@@ -359,9 +381,9 @@ namespace {
         const path_tempo::Limits<3> limits {
             .pathAcceleration = 0.8,
             .pathJerk = 1.2,
-            .axisVelocity = {4.0, 4.0, 4.0},
-            .axisAcceleration = {0.8, 0.8, 0.8},
-            .axisJerk = {1.2, 1.2, 1.2},
+            .coordinateVelocity = {4.0, 4.0, 4.0},
+            .coordinateAcceleration = {0.8, 0.8, 0.8},
+            .coordinateJerk = {1.2, 1.2, 1.2},
         };
         const auto planned = planner.solve(path_tempo::PathPlanningRequest<3> {
             .pieces = pieces,
@@ -381,7 +403,7 @@ namespace {
         require(planned->diagnostics.correctedPieces == 1, "coupled curved constraints should trigger a local correction for this path");
 
         for (const auto &station : curve.stations) {
-            const auto tolerance = 1e-10;
+            const auto tolerance = STATION_MATCH_TOLERANCE;
 
             for (const auto &segment : planned->timeLaw.segments) {
                 const auto localFrom = segment.position(0.0);
@@ -416,13 +438,13 @@ namespace {
                     const auto coupledJerk = station.tangent[axis] * jerk + 3.0 * station.curvature[axis] * velocity * acceleration + station.thirdDerivative[axis] * velocity * velocity * velocity;
                     coupledAccelerationSquared += coupledAcceleration * coupledAcceleration;
                     coupledJerkSquared += coupledJerk * coupledJerk;
-                    require(std::abs(station.tangent[axis] * velocity) <= limits.axisVelocity[axis] * (1.0 + 1e-8), "curved timing should obey sampled axis velocity");
-                    require(std::abs(coupledAcceleration) <= limits.axisAcceleration[axis] * (1.0 + 1e-8), "curved timing should obey sampled coupled axis acceleration");
-                    require(std::abs(coupledJerk) <= limits.axisJerk[axis] * (1.0 + 1e-8), "curved timing should obey sampled coupled axis jerk");
+                    require(std::abs(station.tangent[axis] * velocity) <= limits.coordinateVelocity[axis] * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coordinate velocity");
+                    require(std::abs(coupledAcceleration) <= limits.coordinateAcceleration[axis] * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled coordinate acceleration");
+                    require(std::abs(coupledJerk) <= limits.coordinateJerk[axis] * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled coordinate jerk");
                 }
 
-                require(std::sqrt(coupledAccelerationSquared) <= limits.pathAcceleration * (1.0 + 1e-8), "curved timing should obey sampled coupled path acceleration");
-                require(std::sqrt(coupledJerkSquared) <= limits.pathJerk * (1.0 + 1e-8), "curved timing should obey sampled coupled path jerk");
+                require(std::sqrt(coupledAccelerationSquared) <= limits.pathAcceleration * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled path acceleration");
+                require(std::sqrt(coupledJerkSquared) <= limits.pathJerk * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled path jerk");
             }
         }
     }
@@ -438,9 +460,9 @@ namespace {
             .limits = {
                 .pathAcceleration = 1.0,
                 .pathJerk = 0.1,
-                .axisVelocity = {2.0, 2.0, 2.0},
-                .axisAcceleration = {1.0, 1.0, 1.0},
-                .axisJerk = {0.1, 0.1, 0.1},
+                .coordinateVelocity = {2.0, 2.0, 2.0},
+                .coordinateAcceleration = {1.0, 1.0, 1.0},
+                .coordinateJerk = {0.1, 0.1, 0.1},
             },
             .settings = {},
         });
@@ -461,9 +483,9 @@ namespace {
             .limits = {
                 .pathAcceleration = 1.0,
                 .pathJerk = 2.0,
-                .axisVelocity = {3.0, 3.0, 3.0},
-                .axisAcceleration = {1.0, 1.0, 1.0},
-                .axisJerk = {2.0, 2.0, 2.0},
+                .coordinateVelocity = {3.0, 3.0, 3.0},
+                .coordinateAcceleration = {1.0, 1.0, 1.0},
+                .coordinateJerk = {2.0, 2.0, 2.0},
             },
             .settings = {},
         });
@@ -477,13 +499,31 @@ namespace {
         auto previousAcceleration = 0.0;
 
         for (const auto &segment : planned->timeLaw.segments) {
-            require(std::abs(segment.position(0.0) - previousDistance) <= 1e-8, "refined curved cubics should be position-continuous");
-            require(std::abs(segment.velocity(0.0) - previousVelocity) <= 1e-8, "refined curved cubics should be velocity-continuous");
-            require(std::abs(segment.acceleration(0.0) - previousAcceleration) <= 1e-8, "refined curved cubics should be acceleration-continuous");
+            require(std::abs(segment.position(0.0) - previousDistance) <= TIME_LAW_CONTINUITY_TOLERANCE, "refined curved cubics should be position-continuous");
+            require(std::abs(segment.velocity(0.0) - previousVelocity) <= TIME_LAW_CONTINUITY_TOLERANCE, "refined curved cubics should be velocity-continuous");
+            require(std::abs(segment.acceleration(0.0) - previousAcceleration) <= TIME_LAW_CONTINUITY_TOLERANCE, "refined curved cubics should be acceleration-continuous");
             previousDistance = segment.position(segment.duration);
             previousVelocity = segment.velocity(segment.duration);
             previousAcceleration = segment.acceleration(segment.duration);
         }
+
+        const auto repeated = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = {
+                .pathAcceleration = 1.0,
+                .pathJerk = 2.0,
+                .coordinateVelocity = {3.0, 3.0, 3.0},
+                .coordinateAcceleration = {1.0, 1.0, 1.0},
+                .coordinateJerk = {2.0, 2.0, 2.0},
+            },
+            .settings = {},
+        });
+
+        require(repeated.has_value(), "a repeated curved path should solve");
+        require(repeated->diagnostics.transitionCacheHits > 0, "a repeated curved path should reuse scalar transition candidates");
+        require(repeated->diagnostics.transitionCacheMaterializations <= repeated->diagnostics.transitionCacheHits, "only accepted cached candidates should require exact rematerialization");
     }
 
     void testCurvedMovingBoundaryStates() {
@@ -499,20 +539,20 @@ namespace {
             .limits = {
                 .pathAcceleration = 2.0,
                 .pathJerk = 4.0,
-                .axisVelocity = {2.0, 2.0, 2.0},
-                .axisAcceleration = {2.0, 2.0, 2.0},
-                .axisJerk = {4.0, 4.0, 4.0},
+                .coordinateVelocity = {2.0, 2.0, 2.0},
+                .coordinateAcceleration = {2.0, 2.0, 2.0},
+                .coordinateJerk = {4.0, 4.0, 4.0},
             },
             .settings = {},
         });
 
         require(planned.has_value(), "a curved path with nonzero boundary PVA should solve");
-        require(std::abs(planned->timeLaw.segments.front().velocity(0.0) - beginning.velocity) <= 1e-10, "curved planning should preserve beginning velocity");
-        require(std::abs(planned->timeLaw.segments.front().acceleration(0.0) - beginning.acceleration) <= 1e-10, "curved planning should preserve beginning acceleration");
+        require(std::abs(planned->timeLaw.segments.front().velocity(0.0) - beginning.velocity) <= BOUNDARY_LIMIT_TOLERANCE, "curved planning should preserve beginning velocity");
+        require(std::abs(planned->timeLaw.segments.front().acceleration(0.0) - beginning.acceleration) <= BOUNDARY_LIMIT_TOLERANCE, "curved planning should preserve beginning acceleration");
 
         const auto &last = planned->timeLaw.segments.back();
-        require(std::abs(last.velocity(last.duration) - ending.velocity) <= 1e-9, "curved planning should preserve ending velocity");
-        require(std::abs(last.acceleration(last.duration) - ending.acceleration) <= 1e-9, "curved planning should preserve ending acceleration");
+        require(std::abs(last.velocity(last.duration) - ending.velocity) <= SOLVER_ENDPOINT_TOLERANCE, "curved planning should preserve ending velocity");
+        require(std::abs(last.acceleration(last.duration) - ending.acceleration) <= SOLVER_ENDPOINT_TOLERANCE, "curved planning should preserve ending acceleration");
     }
 
     void testMaterializationCorrectionCallback() {
@@ -553,6 +593,7 @@ namespace {
         require(corrected.has_value(), "a valid materialization correction should re-solve");
         require(callbackCalls == 2, "materialization correction should receive the corrected candidate");
         require(corrected->diagnostics.correctedPieces == 1, "materialization correction should retain corrected-piece diagnostics");
+        require(corrected->pieceLimits.size() == 1 && corrected->pieceLimits.front().velocity <= baseline->pieceLimits.front().velocity / 2.0, "materialization correction should report the tightened effective piece limits");
         require(corrected->diagnostics.velocitySeedDuration > baseline->diagnostics.velocitySeedDuration, "a two-times local time scale should slow the corrected path");
 
         path_tempo::PathPlanner invalidPlanner;

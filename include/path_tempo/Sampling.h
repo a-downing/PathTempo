@@ -9,18 +9,9 @@
 #include "path_tempo/Types.h"
 
 namespace path_tempo {
-    struct UniformArcLengthSampling {
-        std::size_t intervals = 64;
-    };
-
-    struct PerKnotIntervalSampling {
-        std::size_t intervals = 16;
-    };
-
     enum class SamplingError {
         InvalidLength,
-        InvalidProgrammedVelocity,
-        InvalidIntervalCount,
+        InvalidMaxVelocity,
         NonFiniteGeometry,
         IrregularCurve,
     };
@@ -59,13 +50,9 @@ namespace path_tempo {
     }
 
     template<std::size_t DoF>
-    std::expected<SampledPathPiece<DoF>, SamplingError> sampleLine(const Line<DoF> &line, const PathPieceId id, const double programmedVelocity, const UniformArcLengthSampling sampling = {.intervals = 1}) {
-        if (sampling.intervals == 0) {
-            return std::unexpected(SamplingError::InvalidIntervalCount);
-        }
-
-        if (!std::isfinite(programmedVelocity) || programmedVelocity <= 0.0) {
-            return std::unexpected(SamplingError::InvalidProgrammedVelocity);
+    std::expected<SampledPathPiece<DoF>, SamplingError> sampleLine(const Line<DoF> &line, const PathPieceId id, const double maxVelocity) {
+        if (!std::isfinite(maxVelocity) || maxVelocity <= 0.0) {
+            return std::unexpected(SamplingError::InvalidMaxVelocity);
         }
 
         if (!detail::finite(line.from) || !detail::finite(line.to)) {
@@ -93,15 +80,11 @@ namespace path_tempo {
         SampledPathPiece<DoF> result;
         result.id = id;
         result.length = length;
-        result.programmedVelocity = programmedVelocity;
-        result.stations.reserve(sampling.intervals + 1);
-
-        for (std::size_t sample = 0; sample <= sampling.intervals; ++sample) {
-            result.stations.push_back({
-                .distance = length * static_cast<double>(sample) / static_cast<double>(sampling.intervals),
-                .tangent = tangent,
-            });
-        }
+        result.maxVelocity = maxVelocity;
+        result.stations = {
+            {.distance = 0.0, .tangent = tangent},
+            {.distance = length, .tangent = tangent},
+        };
 
         return result;
     }

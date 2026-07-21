@@ -32,7 +32,7 @@ namespace path_tempo {
     struct PathPiece {
         PathPieceId id = 0;
         double length = 0.0;
-        double programmedVelocity = 0.0;
+        double maxVelocity = 0.0;
         InitialPieceLimits initialLimits;
         std::span<const DifferentialStation<DoF>> stations;
     };
@@ -41,12 +41,12 @@ namespace path_tempo {
     struct SampledPathPiece {
         PathPieceId id = 0;
         double length = 0.0;
-        double programmedVelocity = 0.0;
+        double maxVelocity = 0.0;
         InitialPieceLimits initialLimits;
         std::vector<DifferentialStation<DoF>> stations;
 
         PathPiece<DoF> view() const {
-            return {id, length, programmedVelocity, initialLimits, stations};
+            return {id, length, maxVelocity, initialLimits, stations};
         }
     };
 
@@ -59,9 +59,9 @@ namespace path_tempo {
     struct Limits {
         double pathAcceleration = std::numeric_limits<double>::infinity();
         double pathJerk = std::numeric_limits<double>::infinity();
-        Vector<DoF> axisVelocity {};
-        Vector<DoF> axisAcceleration {};
-        Vector<DoF> axisJerk {};
+        Vector<DoF> coordinateVelocity {};
+        Vector<DoF> coordinateAcceleration {};
+        Vector<DoF> coordinateJerk {};
     };
 
     struct CubicTimeSegment {

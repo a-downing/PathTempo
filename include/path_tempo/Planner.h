@@ -12,6 +12,29 @@
 #include "path_tempo/Types.h"
 
 namespace path_tempo {
+    namespace detail {
+        // A quarter second bounds one LP solve without making the default
+        // unusably short for moderately sized paths.
+        inline constexpr double DEFAULT_LINEAR_SOLVE_TIME_LIMIT = 0.25;
+        // This is high enough for the sparse refinements seen in normal use
+        // while still bounding pathological simplex work.
+        inline constexpr std::size_t DEFAULT_SIMPLEX_ITERATION_LIMIT = 4096;
+        // Sampled violations normally settle in one or two passes; eight
+        // leaves headroom for coupled constraints without permitting a loop.
+        inline constexpr std::size_t DEFAULT_MAXIMUM_CORRECTION_PASSES = 8;
+        // Four sequential convex refinements capture useful improvement while
+        // keeping solver cost predictable.
+        inline constexpr std::size_t DEFAULT_SEQUENTIAL_ITERATIONS = 4;
+        // Eight halvings can reduce a rejected full refinement to below 0.4%.
+        inline constexpr std::size_t DEFAULT_LINE_SEARCH_STEPS = 8;
+        // Velocity is the most sensitive refinement variable, so its trust
+        // region is limited to 15% of the station cap per iteration.
+        inline constexpr double DEFAULT_VELOCITY_TRUST_FRACTION = 0.15;
+        // Acceleration tolerates a wider 25% trust region while remaining close
+        // enough for the coupled-constraint linearization.
+        inline constexpr double DEFAULT_ACCELERATION_TRUST_FRACTION = 0.25;
+    }
+
     double velocityTransitionDistance(double fromVelocity, double toVelocity, double acceleration, double jerk);
     double reachableVelocity(double fixedVelocity, double cap, double length, double acceleration, double jerk);
 
@@ -39,13 +62,20 @@ namespace path_tempo {
     };
 
     struct PathPlanningSettings {
-        double linearSolveTimeLimit = 0.25;
-        std::size_t simplexIterationLimit = 4096;
-        std::size_t maximumCorrectionPasses = 8;
-        std::size_t sequentialIterations = 4;
-        std::size_t lineSearchSteps = 8;
-        double velocityTrustFraction = 0.15;
-        double accelerationTrustFraction = 0.25;
+        double linearSolveTimeLimit = detail::DEFAULT_LINEAR_SOLVE_TIME_LIMIT;
+        std::size_t simplexIterationLimit = detail::DEFAULT_SIMPLEX_ITERATION_LIMIT;
+        std::size_t maximumCorrectionPasses = detail::DEFAULT_MAXIMUM_CORRECTION_PASSES;
+        std::size_t sequentialIterations = detail::DEFAULT_SEQUENTIAL_ITERATIONS;
+        std::size_t lineSearchSteps = detail::DEFAULT_LINE_SEARCH_STEPS;
+        double velocityTrustFraction = detail::DEFAULT_VELOCITY_TRUST_FRACTION;
+        double accelerationTrustFraction = detail::DEFAULT_ACCELERATION_TRUST_FRACTION;
+        bool applySampledCorrections = true;
+    };
+
+    enum class PlanningResourceLimit {
+        None,
+        Time,
+        SimplexIterations,
     };
 
     template<std::size_t DoF>
@@ -67,17 +97,28 @@ namespace path_tempo {
         std::size_t sequentialSolves = 0;
         std::size_t lineSearchTrials = 0;
         std::size_t acceptedRefinements = 0;
+        std::size_t transitionRequests = 0;
+        std::size_t transitionSolverCalls = 0;
+        std::size_t transitionCacheHits = 0;
+        std::size_t transitionCacheFailureHits = 0;
+        std::size_t transitionCacheMaterializations = 0;
+        PlanningResourceLimit resourceLimit = PlanningResourceLimit::None;
+        std::size_t resourceLimitOccurrences = 0;
+        std::size_t firstResourceLimitedSequentialIteration = 0;
     };
 
     struct PlannedPath {
         TimeLaw timeLaw;
         std::vector<BoundaryState> pieceBoundaries;
+        std::vector<InitialPieceLimits> pieceLimits;
         PathPlanningDiagnostics diagnostics;
     };
 
     using MaterializationCorrection = std::function<std::expected<std::vector<PieceCorrection>, std::string>(const PlannedPath &candidate)>;
 
     class ScalarTransition {
+        // Ruckig's one-DoF position interface emits at most seven phases. Ten
+        // leaves room for zero-duration filtering and a final residual phase.
         static constexpr std::size_t CAPACITY = 10;
         std::array<CubicTimeSegment, CAPACITY> m_segments {};
         std::size_t m_size = 0;
@@ -127,9 +168,9 @@ namespace path_tempo {
             double maximumJerk = 0.0;
             struct Station {
                 double distance = 0.0;
-                std::vector<double> tangent;
-                std::vector<double> curvature;
-                std::vector<double> thirdDerivative;
+                std::span<const double> tangent;
+                std::span<const double> curvature;
+                std::span<const double> thirdDerivative;
             };
             std::vector<Station> stations;
         };
@@ -137,9 +178,9 @@ namespace path_tempo {
         struct CoupledLimits {
             double pathAcceleration = 0.0;
             double pathJerk = 0.0;
-            std::vector<double> axisVelocity;
-            std::vector<double> axisAcceleration;
-            std::vector<double> axisJerk;
+            std::vector<double> coordinateVelocity;
+            std::vector<double> coordinateAcceleration;
+            std::vector<double> coordinateJerk;
         };
 
         std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
