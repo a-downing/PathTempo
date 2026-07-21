@@ -61,6 +61,7 @@ namespace path_tempo {
     struct PathPlanner::Implementation {
         ScalarTransitionPlanner transitionPlanner;
         PersistentLinearSolver linearSolver;
+        PersistentLinearSolver refinementSolver;
     };
 
     std::size_t ScalarTransition::size() const noexcept {
@@ -280,42 +281,7 @@ namespace path_tempo {
 
     PathPlanner &PathPlanner::operator=(PathPlanner &&) noexcept = default;
 
-    std::expected<PlannedPath, PlanningError> PathPlanner::solveLocal(const std::span<const LocalPiece> pieces, const BoundaryState beginning, const BoundaryState ending, const PathPlanningSettings &settings) {
-        const auto stationCount = pieces.size() + 1;
-        std::vector<double> stationCaps(stationCount, std::numeric_limits<double>::infinity());
-        stationCaps.front() = beginning.velocity;
-        stationCaps.back() = ending.velocity;
-
-        for (std::size_t station = 1; station + 1 < stationCount; ++station) {
-            stationCaps[station] = std::min(pieces[station - 1].maximumVelocity, pieces[station].maximumVelocity);
-        }
-
-        if (beginning.velocity > pieces.front().maximumVelocity * (1.0 + 1e-10) || ending.velocity > pieces.back().maximumVelocity * (1.0 + 1e-10) || std::abs(beginning.acceleration) > pieces.front().maximumAcceleration * (1.0 + 1e-10) || std::abs(ending.acceleration) > pieces.back().maximumAcceleration * (1.0 + 1e-10)) {
-            return std::unexpected(PlanningError {
-                .code = PlanningErrorCode::InvalidInput,
-                .message = "path boundary state exceeds a local piece limit",
-            });
-        }
-
-        SparseLinearProgram envelope(stationCount);
-
-        for (std::size_t station = 0; station < stationCount; ++station) {
-            const auto capSquared = stationCaps[station] * stationCaps[station];
-            envelope.columnCost(station) = station == 0 || station + 1 == stationCount ? 0.0 : -1.0;
-            envelope.columnLower(station) = capSquared;
-            envelope.columnUpper(station) = capSquared;
-
-            if (station > 0 && station + 1 < stationCount) {
-                envelope.columnLower(station) = 0.0;
-            }
-        }
-
-        for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
-            const auto maximumEnergyChange = 2.0 * pieces[pieceIndex].maximumAcceleration * pieces[pieceIndex].length;
-            envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex + 1, 1.0}, {pieceIndex, -1.0}});
-            envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex, 1.0}, {pieceIndex + 1, -1.0}});
-        }
-
+    std::expected<PlannedPath, PlanningError> PathPlanner::solveLocal(const std::span<const LocalPiece> pieces, const BoundaryState beginning, const BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings) {
         if (auto configured = m_implementation->linearSolver.configure(settings.linearSolveTimeLimit); !configured) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::SolverFailure,
@@ -323,119 +289,415 @@ namespace path_tempo {
             });
         }
 
-        const auto solved = m_implementation->linearSolver.solve(envelope, {
-            .simplexIterationLimit = settings.simplexIterationLimit,
-        });
-
-        if (!solved) {
+        if (auto configured = m_implementation->refinementSolver.configure(settings.linearSolveTimeLimit); !configured) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::SolverFailure,
-                .message = std::format("path velocity-envelope solve failed: {}", solved.error()),
+                .message = std::format("could not configure the coupled refinement solver: {}", configured.error()),
             });
         }
+        auto correctedPieces = std::vector<bool>(pieces.size(), false);
+        auto localPieces = std::vector<LocalPiece>(pieces.begin(), pieces.end());
+        const auto stationCount = pieces.size() + 1;
 
-        if (solved->status != LinearSolveStatus::Optimal) {
-            return std::unexpected(PlanningError {
-                .code = PlanningErrorCode::SolverFailure,
-                .message = solved->status == LinearSolveStatus::TimeLimit ? "path velocity-envelope solve reached its time limit" : "path velocity-envelope solve reached its iteration limit",
-            });
-        }
+        const auto coupledTimeScale = [&](const LocalPiece &piece, const ScalarTransition &transition) {
+            auto required = 1.0;
+            const auto consider = [&](const double measured, const double limit, const double exponent) {
+                if (std::isfinite(limit) && measured > limit) {
+                    required = std::max(required, std::pow(measured / limit, exponent));
+                }
+            };
 
-        std::vector<double> stationVelocity(stationCount);
+            for (const auto &station : piece.stations) {
+                const auto tolerance = std::max(1e-12, piece.length * 1e-10);
 
-        for (std::size_t station = 0; station < stationCount; ++station) {
-            stationVelocity[station] = std::sqrt(std::clamp(solved->values[station], 0.0, stationCaps[station] * stationCaps[station]));
-        }
+                for (const auto &segment : transition) {
+                    const auto from = segment.position(0.0);
+                    const auto to = segment.position(segment.duration);
 
-        stationVelocity.front() = beginning.velocity;
-        stationVelocity.back() = ending.velocity;
-        const auto reachabilityPasses = 2 * pieces.size() + 8;
-
-        for (std::size_t pass = 0; pass < reachabilityPasses; ++pass) {
-            auto maximumChange = 0.0;
-
-            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
-                const auto reachable = reachableVelocity(stationVelocity[pieceIndex], std::min(stationCaps[pieceIndex + 1], pieces[pieceIndex].maximumVelocity), pieces[pieceIndex].length, pieces[pieceIndex].maximumAcceleration, pieces[pieceIndex].maximumJerk);
-
-                if (pieceIndex + 1 == pieces.size()) {
-                    if (reachable + 1e-10 < ending.velocity) {
-                        return std::unexpected(PlanningError {
-                            .code = PlanningErrorCode::SolverFailure,
-                            .message = "fixed ending velocity is not forward reachable",
-                        });
+                    if (station.distance < from - tolerance || station.distance > to + tolerance) {
+                        continue;
                     }
-                } else {
-                    const auto reduced = std::min(stationVelocity[pieceIndex + 1], reachable);
-                    maximumChange = std::max(maximumChange, stationVelocity[pieceIndex + 1] - reduced);
-                    stationVelocity[pieceIndex + 1] = reduced;
+
+                    auto low = 0.0;
+                    auto high = segment.duration;
+
+                    for (unsigned iteration = 0; iteration < 56; ++iteration) {
+                        const auto middle = std::midpoint(low, high);
+
+                        if (segment.position(middle) < station.distance) {
+                            low = middle;
+                        } else {
+                            high = middle;
+                        }
+                    }
+
+                    const auto time = std::midpoint(low, high);
+                    const auto velocity = std::max(0.0, segment.velocity(time));
+                    const auto acceleration = segment.acceleration(time);
+                    const auto jerk = segment.jerk();
+                    auto accelerationSquared = 0.0;
+                    auto jerkSquared = 0.0;
+
+                    for (std::size_t axis = 0; axis < station.tangent.size(); ++axis) {
+                        const auto axisVelocity = station.tangent[axis] * velocity;
+                        const auto axisAcceleration = station.tangent[axis] * acceleration + station.curvature[axis] * velocity * velocity;
+                        const auto axisJerk = station.tangent[axis] * jerk + 3.0 * station.curvature[axis] * velocity * acceleration + station.thirdDerivative[axis] * velocity * velocity * velocity;
+                        accelerationSquared += axisAcceleration * axisAcceleration;
+                        jerkSquared += axisJerk * axisJerk;
+                        consider(std::abs(axisVelocity), limits.axisVelocity[axis], 1.0);
+                        consider(std::abs(axisAcceleration), limits.axisAcceleration[axis], 0.5);
+                        consider(std::abs(axisJerk), limits.axisJerk[axis], 1.0 / 3.0);
+                    }
+
+                    consider(std::sqrt(accelerationSquared), limits.pathAcceleration, 0.5);
+                    consider(std::sqrt(jerkSquared), limits.pathJerk, 1.0 / 3.0);
                 }
             }
 
-            for (std::size_t pieceIndex = pieces.size(); pieceIndex-- > 0;) {
-                const auto reachable = reachableVelocity(stationVelocity[pieceIndex + 1], std::min(stationCaps[pieceIndex], pieces[pieceIndex].maximumVelocity), pieces[pieceIndex].length, pieces[pieceIndex].maximumAcceleration, pieces[pieceIndex].maximumJerk);
+            return required;
+        };
 
-                if (pieceIndex == 0) {
-                    if (reachable + 1e-10 < beginning.velocity) {
-                        return std::unexpected(PlanningError {
-                            .code = PlanningErrorCode::SolverFailure,
-                            .message = "fixed beginning velocity cannot reach the remaining path",
-                        });
-                    }
-                } else {
-                    const auto reduced = std::min(stationVelocity[pieceIndex], reachable);
-                    maximumChange = std::max(maximumChange, stationVelocity[pieceIndex] - reduced);
-                    stationVelocity[pieceIndex] = reduced;
-                }
+        for (std::size_t correctionPass = 0; correctionPass < settings.maximumCorrectionPasses; ++correctionPass) {
+            std::vector<double> stationCaps(stationCount, std::numeric_limits<double>::infinity());
+            stationCaps.front() = beginning.velocity;
+            stationCaps.back() = ending.velocity;
+
+            for (std::size_t station = 1; station + 1 < stationCount; ++station) {
+                stationCaps[station] = std::min(localPieces[station - 1].maximumVelocity, localPieces[station].maximumVelocity);
             }
 
-            if (maximumChange <= 1e-11) {
-                break;
-            }
-        }
-
-        PlannedPath result;
-        result.timeLaw.beginning = beginning;
-        result.timeLaw.ending = ending;
-        result.pieceBoundaries.resize(stationCount);
-        result.pieceBoundaries.front() = beginning;
-        result.pieceBoundaries.back() = ending;
-        result.diagnostics.linearSolverIterations = solved->diagnostics.simplexIterations;
-        result.diagnostics.linearSolverBasisReused = solved->diagnostics.basisReuseApplied;
-        auto pathDistance = 0.0;
-
-        for (std::size_t station = 1; station + 1 < stationCount; ++station) {
-            result.pieceBoundaries[station] = {.velocity = stationVelocity[station]};
-        }
-
-        for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
-            const auto &piece = pieces[pieceIndex];
-            const auto transition = m_implementation->transitionPlanner.solve({
-                .piece = piece.id,
-                .length = piece.length,
-                .beginning = result.pieceBoundaries[pieceIndex],
-                .ending = result.pieceBoundaries[pieceIndex + 1],
-                .maximumVelocity = piece.maximumVelocity,
-                .maximumAcceleration = piece.maximumAcceleration,
-                .maximumJerk = piece.maximumJerk,
-            });
-
-            if (!transition) {
+            if (beginning.velocity > localPieces.front().maximumVelocity * (1.0 + 1e-10) || ending.velocity > localPieces.back().maximumVelocity * (1.0 + 1e-10) || std::abs(beginning.acceleration) > localPieces.front().maximumAcceleration * (1.0 + 1e-10) || std::abs(ending.acceleration) > localPieces.back().maximumAcceleration * (1.0 + 1e-10)) {
                 return std::unexpected(PlanningError {
-                    .code = transition.error().code,
-                    .message = std::format("could not materialize path piece {}: {}", pieceIndex, transition.error().message),
+                    .code = PlanningErrorCode::InvalidInput,
+                    .message = correctionPass == 0 ? "path boundary state exceeds a local piece limit" : "fixed path boundary state cannot satisfy the coupled curved-path limits",
                 });
             }
 
-            result.diagnostics.velocitySeedDuration += transition->duration();
+            SparseLinearProgram envelope(stationCount);
 
-            for (auto segment : *transition) {
-                segment.c0 += pathDistance;
-                result.timeLaw.segments.push_back(segment);
+            for (std::size_t station = 0; station < stationCount; ++station) {
+                const auto capSquared = stationCaps[station] * stationCaps[station];
+                envelope.columnCost(station) = station == 0 || station + 1 == stationCount ? 0.0 : -1.0;
+                envelope.columnLower(station) = station > 0 && station + 1 < stationCount ? 0.0 : capSquared;
+                envelope.columnUpper(station) = capSquared;
             }
 
-            pathDistance += piece.length;
+            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                const auto maximumEnergyChange = 2.0 * localPieces[pieceIndex].maximumAcceleration * localPieces[pieceIndex].length;
+                envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex + 1, 1.0}, {pieceIndex, -1.0}});
+                envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex, 1.0}, {pieceIndex + 1, -1.0}});
+            }
+
+            const auto solved = m_implementation->linearSolver.solve(envelope, {
+                .simplexIterationLimit = settings.simplexIterationLimit,
+            });
+
+            if (!solved) {
+                return std::unexpected(PlanningError {
+                    .code = PlanningErrorCode::SolverFailure,
+                    .message = std::format("path velocity-envelope solve failed: {}", solved.error()),
+                });
+            }
+
+            if (solved->status != LinearSolveStatus::Optimal) {
+                return std::unexpected(PlanningError {
+                    .code = PlanningErrorCode::SolverFailure,
+                    .message = solved->status == LinearSolveStatus::TimeLimit ? "path velocity-envelope solve reached its time limit" : "path velocity-envelope solve reached its iteration limit",
+                });
+            }
+
+            std::vector<double> stationVelocity(stationCount);
+
+            for (std::size_t station = 0; station < stationCount; ++station) {
+                stationVelocity[station] = std::sqrt(std::clamp(solved->values[station], 0.0, stationCaps[station] * stationCaps[station]));
+            }
+
+            stationVelocity.front() = beginning.velocity;
+            stationVelocity.back() = ending.velocity;
+            const auto reachabilityPasses = 2 * pieces.size() + 8;
+
+            for (std::size_t pass = 0; pass < reachabilityPasses; ++pass) {
+                auto maximumChange = 0.0;
+
+                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                    const auto &piece = localPieces[pieceIndex];
+                    const auto reachable = reachableVelocity(stationVelocity[pieceIndex], std::min(stationCaps[pieceIndex + 1], piece.maximumVelocity), piece.length, piece.maximumAcceleration, piece.maximumJerk);
+
+                    if (pieceIndex + 1 == pieces.size()) {
+                        if (reachable + 1e-10 < ending.velocity) {
+                            return std::unexpected(PlanningError {.code = PlanningErrorCode::SolverFailure, .message = "fixed ending velocity is not forward reachable"});
+                        }
+                    } else {
+                        const auto reduced = std::min(stationVelocity[pieceIndex + 1], reachable);
+                        maximumChange = std::max(maximumChange, stationVelocity[pieceIndex + 1] - reduced);
+                        stationVelocity[pieceIndex + 1] = reduced;
+                    }
+                }
+
+                for (std::size_t pieceIndex = pieces.size(); pieceIndex-- > 0;) {
+                    const auto &piece = localPieces[pieceIndex];
+                    const auto reachable = reachableVelocity(stationVelocity[pieceIndex + 1], std::min(stationCaps[pieceIndex], piece.maximumVelocity), piece.length, piece.maximumAcceleration, piece.maximumJerk);
+
+                    if (pieceIndex == 0) {
+                        if (reachable + 1e-10 < beginning.velocity) {
+                            return std::unexpected(PlanningError {.code = PlanningErrorCode::SolverFailure, .message = "fixed beginning velocity cannot reach the remaining path"});
+                        }
+                    } else {
+                        const auto reduced = std::min(stationVelocity[pieceIndex], reachable);
+                        maximumChange = std::max(maximumChange, stationVelocity[pieceIndex] - reduced);
+                        stationVelocity[pieceIndex] = reduced;
+                    }
+                }
+
+                if (maximumChange <= 1e-11) {
+                    break;
+                }
+            }
+
+            PlannedPath result;
+            result.timeLaw.beginning = beginning;
+            result.timeLaw.ending = ending;
+            result.pieceBoundaries.resize(stationCount);
+            result.pieceBoundaries.front() = beginning;
+            result.pieceBoundaries.back() = ending;
+            result.diagnostics.linearSolverIterations = solved->diagnostics.simplexIterations;
+            result.diagnostics.linearSolverBasisReused = solved->diagnostics.basisReuseApplied;
+            result.diagnostics.correctionPasses = correctionPass + 1;
+            std::vector<ScalarTransition> transitions;
+            transitions.reserve(pieces.size());
+            auto pathDistance = 0.0;
+
+            for (std::size_t station = 1; station + 1 < stationCount; ++station) {
+                result.pieceBoundaries[station] = {.velocity = stationVelocity[station]};
+            }
+
+            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                const auto &piece = localPieces[pieceIndex];
+                const auto transition = m_implementation->transitionPlanner.solve({
+                    .piece = piece.id,
+                    .length = piece.length,
+                    .beginning = result.pieceBoundaries[pieceIndex],
+                    .ending = result.pieceBoundaries[pieceIndex + 1],
+                    .maximumVelocity = piece.maximumVelocity,
+                    .maximumAcceleration = piece.maximumAcceleration,
+                    .maximumJerk = piece.maximumJerk,
+                });
+
+                if (!transition) {
+                    return std::unexpected(PlanningError {
+                        .code = transition.error().code,
+                        .message = std::format("could not materialize path piece {}: {}", pieceIndex, transition.error().message),
+                    });
+                }
+
+                result.diagnostics.velocitySeedDuration += transition->duration();
+                transitions.push_back(*transition);
+
+                for (auto segment : *transition) {
+                    segment.c0 += pathDistance;
+                    result.timeLaw.segments.push_back(segment);
+                }
+
+                pathDistance += piece.length;
+            }
+
+            std::vector<double> corrections(pieces.size(), 1.0);
+            auto maximumCorrection = 1.0;
+
+            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                corrections[pieceIndex] = coupledTimeScale(localPieces[pieceIndex], transitions[pieceIndex]);
+                maximumCorrection = std::max(maximumCorrection, corrections[pieceIndex]);
+            }
+
+            if (maximumCorrection <= 1.0 + 1e-9) {
+                for (std::size_t sequentialIteration = 0; sequentialIteration < settings.sequentialIterations && stationCount > 2; ++sequentialIteration) {
+                    const auto velocityColumn = [](const std::size_t station) { return station; };
+                    const auto accelerationColumn = [stationCount](const std::size_t station) { return stationCount + station; };
+                    SparseLinearProgram refinement(2 * stationCount);
+
+                    for (std::size_t station = 0; station < stationCount; ++station) {
+                        const auto referenceVelocity = result.pieceBoundaries[station].velocity;
+                        const auto referenceAcceleration = result.pieceBoundaries[station].acceleration;
+                        const auto velocityTrust = settings.velocityTrustFraction * std::max(1e-6, stationCaps[station]);
+                        auto accelerationLimit = std::numeric_limits<double>::infinity();
+
+                        if (station > 0) {
+                            accelerationLimit = std::min(accelerationLimit, localPieces[station - 1].maximumAcceleration);
+                        }
+
+                        if (station < pieces.size()) {
+                            accelerationLimit = std::min(accelerationLimit, localPieces[station].maximumAcceleration);
+                        }
+
+                        auto velocityLower = std::max(0.0, referenceVelocity - velocityTrust);
+                        auto velocityUpper = std::min(stationCaps[station], referenceVelocity + velocityTrust);
+                        auto accelerationLower = std::max(-accelerationLimit, referenceAcceleration - settings.accelerationTrustFraction * accelerationLimit);
+                        auto accelerationUpper = std::min(accelerationLimit, referenceAcceleration + settings.accelerationTrustFraction * accelerationLimit);
+
+                        if (station == 0 || station + 1 == stationCount) {
+                            velocityLower = velocityUpper = referenceVelocity;
+                            accelerationLower = accelerationUpper = referenceAcceleration;
+                        }
+
+                        refinement.columnLower(velocityColumn(station)) = velocityLower;
+                        refinement.columnUpper(velocityColumn(station)) = velocityUpper;
+                        refinement.columnLower(accelerationColumn(station)) = accelerationLower;
+                        refinement.columnUpper(accelerationColumn(station)) = accelerationUpper;
+                    }
+
+                    for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                        const auto speedSum = std::max(1e-6, result.pieceBoundaries[pieceIndex].velocity + result.pieceBoundaries[pieceIndex + 1].velocity);
+                        const auto objectiveDerivative = -2.0 * pieces[pieceIndex].length / (speedSum * speedSum);
+                        refinement.columnCost(velocityColumn(pieceIndex)) += objectiveDerivative;
+                        refinement.columnCost(velocityColumn(pieceIndex + 1)) += objectiveDerivative;
+                    }
+
+                    const auto addAccelerationConstraints = [&](const LocalPiece::Station &geometry, const std::size_t station) {
+                        const auto referenceVelocity = result.pieceBoundaries[station].velocity;
+                        const auto referenceAcceleration = result.pieceBoundaries[station].acceleration;
+                        const auto vColumn = velocityColumn(station);
+                        const auto aColumn = accelerationColumn(station);
+                        std::vector<double> referenceVector(geometry.tangent.size());
+                        auto referenceNormSquared = 0.0;
+
+                        for (std::size_t axis = 0; axis < geometry.tangent.size(); ++axis) {
+                            const auto velocityCoefficient = 2.0 * geometry.curvature[axis] * referenceVelocity;
+                            const auto accelerationCoefficient = geometry.tangent[axis];
+                            const auto constant = -geometry.curvature[axis] * referenceVelocity * referenceVelocity;
+                            const auto limit = limits.axisAcceleration[axis];
+
+                            if (std::isfinite(limit)) {
+                                refinement.addRow(-limit - constant, limit - constant, {{vColumn, velocityCoefficient}, {aColumn, accelerationCoefficient}});
+                            }
+
+                            referenceVector[axis] = geometry.tangent[axis] * referenceAcceleration + geometry.curvature[axis] * referenceVelocity * referenceVelocity;
+                            referenceNormSquared += referenceVector[axis] * referenceVector[axis];
+                        }
+
+                        const auto referenceNorm = std::sqrt(referenceNormSquared);
+
+                        if (std::isfinite(limits.pathAcceleration) && referenceNorm > 1e-12) {
+                            auto velocityCoefficient = 0.0;
+                            auto accelerationCoefficient = 0.0;
+                            auto constant = 0.0;
+
+                            for (std::size_t axis = 0; axis < geometry.tangent.size(); ++axis) {
+                                const auto direction = referenceVector[axis] / referenceNorm;
+                                velocityCoefficient += direction * 2.0 * geometry.curvature[axis] * referenceVelocity;
+                                accelerationCoefficient += direction * geometry.tangent[axis];
+                                constant -= direction * geometry.curvature[axis] * referenceVelocity * referenceVelocity;
+                            }
+
+                            refinement.addRow(-linearProgramInfinity(), limits.pathAcceleration - constant, {{vColumn, velocityCoefficient}, {aColumn, accelerationCoefficient}});
+                        }
+                    };
+
+                    for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                        addAccelerationConstraints(localPieces[pieceIndex].stations.front(), pieceIndex);
+                        addAccelerationConstraints(localPieces[pieceIndex].stations.back(), pieceIndex + 1);
+                    }
+
+                    const auto refined = m_implementation->refinementSolver.solve(refinement, {
+                        .simplexIterationLimit = settings.simplexIterationLimit,
+                    });
+
+                    if (!refined) {
+                        return std::unexpected(PlanningError {
+                            .code = PlanningErrorCode::SolverFailure,
+                            .message = std::format("coupled sequential refinement failed: {}", refined.error()),
+                        });
+                    }
+
+                    ++result.diagnostics.sequentialSolves;
+                    result.diagnostics.linearSolverIterations += refined->diagnostics.simplexIterations;
+                    result.diagnostics.linearSolverBasisReused = result.diagnostics.linearSolverBasisReused || refined->diagnostics.basisReuseApplied;
+
+                    if (refined->status != LinearSolveStatus::Optimal) {
+                        break;
+                    }
+
+                    auto acceptedAny = false;
+
+                    for (std::size_t station = 1; station + 1 < stationCount; ++station) {
+                        const auto proposedVelocity = std::clamp(refined->values[velocityColumn(station)], 0.0, stationCaps[station]);
+                        const auto proposedAcceleration = refined->values[accelerationColumn(station)];
+                        const auto oldDuration = transitions[station - 1].duration() + transitions[station].duration();
+
+                        for (std::size_t lineSearch = 0; lineSearch < settings.lineSearchSteps; ++lineSearch) {
+                            ++result.diagnostics.lineSearchTrials;
+                            const auto fraction = std::ldexp(1.0, -static_cast<int>(lineSearch));
+                            const BoundaryState trial {
+                                .velocity = std::lerp(result.pieceBoundaries[station].velocity, proposedVelocity, fraction),
+                                .acceleration = std::lerp(result.pieceBoundaries[station].acceleration, proposedAcceleration, fraction),
+                            };
+                            const auto &leftPiece = localPieces[station - 1];
+                            const auto &rightPiece = localPieces[station];
+                            const auto left = m_implementation->transitionPlanner.solve({leftPiece.id, leftPiece.length, result.pieceBoundaries[station - 1], trial, leftPiece.maximumVelocity, leftPiece.maximumAcceleration, leftPiece.maximumJerk});
+
+                            if (!left || coupledTimeScale(leftPiece, *left) > 1.0 + 1e-9) {
+                                continue;
+                            }
+
+                            const auto right = m_implementation->transitionPlanner.solve({rightPiece.id, rightPiece.length, trial, result.pieceBoundaries[station + 1], rightPiece.maximumVelocity, rightPiece.maximumAcceleration, rightPiece.maximumJerk});
+
+                            if (!right || coupledTimeScale(rightPiece, *right) > 1.0 + 1e-9 || left->duration() + right->duration() > oldDuration * (1.0 + 1e-10)) {
+                                continue;
+                            }
+
+                            result.pieceBoundaries[station] = trial;
+                            transitions[station - 1] = *left;
+                            transitions[station] = *right;
+                            ++result.diagnostics.acceptedRefinements;
+                            acceptedAny = true;
+                            break;
+                        }
+                    }
+
+                    if (!acceptedAny) {
+                        break;
+                    }
+                }
+
+                result.timeLaw.segments.clear();
+                result.diagnostics.velocitySeedDuration = 0.0;
+                auto refinedPathDistance = 0.0;
+
+                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                    result.diagnostics.velocitySeedDuration += transitions[pieceIndex].duration();
+
+                    for (auto segment : transitions[pieceIndex]) {
+                        segment.c0 += refinedPathDistance;
+                        result.timeLaw.segments.push_back(segment);
+                    }
+
+                    refinedPathDistance += pieces[pieceIndex].length;
+                }
+
+                result.diagnostics.correctedPieces = std::ranges::count(correctedPieces, true);
+
+                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                    result.diagnostics.maximumAppliedTimeScale = std::max(result.diagnostics.maximumAppliedTimeScale, pieces[pieceIndex].maximumVelocity / localPieces[pieceIndex].maximumVelocity);
+                }
+
+                return result;
+            }
+
+            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                if (corrections[pieceIndex] <= 1.0 + 1e-9) {
+                    continue;
+                }
+
+                correctedPieces[pieceIndex] = true;
+                const auto factor = corrections[pieceIndex] * 1.01;
+                localPieces[pieceIndex].maximumVelocity /= factor;
+                localPieces[pieceIndex].maximumAcceleration /= factor * factor;
+                localPieces[pieceIndex].maximumJerk /= factor * factor * factor;
+            }
         }
 
-        return result;
+        return std::unexpected(PlanningError {
+            .code = PlanningErrorCode::SolverFailure,
+            .message = std::format("coupled curved-path constraint correction did not converge after {} passes", settings.maximumCorrectionPasses),
+        });
     }
 }

@@ -40,6 +40,11 @@ namespace path_tempo {
     struct PathPlanningSettings {
         double linearSolveTimeLimit = 0.25;
         std::size_t simplexIterationLimit = 4096;
+        std::size_t maximumCorrectionPasses = 8;
+        std::size_t sequentialIterations = 4;
+        std::size_t lineSearchSteps = 8;
+        double velocityTrustFraction = 0.15;
+        double accelerationTrustFraction = 0.25;
     };
 
     template<std::size_t DoF>
@@ -55,6 +60,12 @@ namespace path_tempo {
         std::size_t linearSolverIterations = 0;
         bool linearSolverBasisReused = false;
         double velocitySeedDuration = 0.0;
+        std::size_t correctionPasses = 0;
+        std::size_t correctedPieces = 0;
+        double maximumAppliedTimeScale = 1.0;
+        std::size_t sequentialSolves = 0;
+        std::size_t lineSearchTrials = 0;
+        std::size_t acceptedRefinements = 0;
     };
 
     struct PlannedPath {
@@ -111,9 +122,24 @@ namespace path_tempo {
             double maximumVelocity = 0.0;
             double maximumAcceleration = 0.0;
             double maximumJerk = 0.0;
+            struct Station {
+                double distance = 0.0;
+                std::vector<double> tangent;
+                std::vector<double> curvature;
+                std::vector<double> thirdDerivative;
+            };
+            std::vector<Station> stations;
         };
 
-        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const PathPlanningSettings &settings);
+        struct CoupledLimits {
+            double pathAcceleration = 0.0;
+            double pathJerk = 0.0;
+            std::vector<double> axisVelocity;
+            std::vector<double> axisAcceleration;
+            std::vector<double> axisJerk;
+        };
+
+        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings);
 
     public:
         PathPlanner();

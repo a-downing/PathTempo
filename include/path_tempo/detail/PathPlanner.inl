@@ -14,7 +14,7 @@ namespace path_tempo {
             });
         }
 
-        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || !std::isfinite(request.settings.linearSolveTimeLimit) || request.settings.linearSolveTimeLimit <= 0.0 || request.settings.simplexIterationLimit == 0) {
+        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || !std::isfinite(request.settings.linearSolveTimeLimit) || request.settings.linearSolveTimeLimit <= 0.0 || request.settings.simplexIterationLimit == 0 || request.settings.maximumCorrectionPasses == 0 || (request.settings.sequentialIterations > 0 && request.settings.lineSearchSteps == 0) || !std::isfinite(request.settings.velocityTrustFraction) || request.settings.velocityTrustFraction <= 0.0 || request.settings.velocityTrustFraction > 1.0 || !std::isfinite(request.settings.accelerationTrustFraction) || request.settings.accelerationTrustFraction <= 0.0 || request.settings.accelerationTrustFraction > 1.0) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::InvalidInput,
                 .message = "path planning received invalid boundary state or solver settings",
@@ -45,6 +45,8 @@ namespace path_tempo {
             auto maximumAcceleration = std::min(request.limits.pathAcceleration, piece.initialLimits.acceleration);
             auto maximumJerk = std::min(request.limits.pathJerk, piece.initialLimits.jerk);
             auto previousDistance = -1.0;
+            std::vector<LocalPiece::Station> stations;
+            stations.reserve(piece.stations.size());
 
             for (const auto &station : piece.stations) {
                 if (!std::isfinite(station.distance) || station.distance < previousDistance || station.distance < 0.0 || station.distance > piece.length) {
@@ -71,19 +73,20 @@ namespace path_tempo {
                         });
                     }
 
-                    if (std::abs(curvature) > 1e-12 || std::abs(thirdDerivative) > 1e-12) {
-                        return std::unexpected(PlanningError {
-                            .code = PlanningErrorCode::InvalidInput,
-                            .message = std::format("path piece {} is curved; the initial multi-piece planner currently supports straight pieces", pieceIndex),
-                        });
-                    }
-
                     tangentSquared += tangent * tangent;
 
                     if (std::abs(tangent) > 1e-15) {
                         maximumVelocity = std::min(maximumVelocity, axisVelocity / std::abs(tangent));
                         maximumAcceleration = std::min(maximumAcceleration, axisAcceleration / std::abs(tangent));
                         maximumJerk = std::min(maximumJerk, axisJerk / std::abs(tangent));
+                    }
+
+                    if (std::abs(curvature) > 1e-15) {
+                        maximumVelocity = std::min(maximumVelocity, std::sqrt(axisAcceleration / std::abs(curvature)));
+                    }
+
+                    if (std::abs(thirdDerivative) > 1e-15) {
+                        maximumVelocity = std::min(maximumVelocity, std::cbrt(axisJerk / std::abs(thirdDerivative)));
                     }
                 }
 
@@ -93,6 +96,32 @@ namespace path_tempo {
                         .message = std::format("path piece {} has a non-unit station tangent", pieceIndex),
                     });
                 }
+
+                auto curvatureSquared = 0.0;
+                auto thirdDerivativeSquared = 0.0;
+
+                for (std::size_t axis = 0; axis < DoF; ++axis) {
+                    curvatureSquared += station.curvature[axis] * station.curvature[axis];
+                    thirdDerivativeSquared += station.thirdDerivative[axis] * station.thirdDerivative[axis];
+                }
+
+                const auto curvatureMagnitude = std::sqrt(curvatureSquared);
+                const auto thirdDerivativeMagnitude = std::sqrt(thirdDerivativeSquared);
+
+                if (curvatureMagnitude > 1e-15) {
+                    maximumVelocity = std::min(maximumVelocity, std::sqrt(request.limits.pathAcceleration / curvatureMagnitude));
+                }
+
+                if (thirdDerivativeMagnitude > 1e-15) {
+                    maximumVelocity = std::min(maximumVelocity, std::cbrt(request.limits.pathJerk / thirdDerivativeMagnitude));
+                }
+
+                stations.push_back({
+                    .distance = station.distance,
+                    .tangent = {station.tangent.begin(), station.tangent.end()},
+                    .curvature = {station.curvature.begin(), station.curvature.end()},
+                    .thirdDerivative = {station.thirdDerivative.begin(), station.thirdDerivative.end()},
+                });
 
                 previousDistance = station.distance;
             }
@@ -111,7 +140,7 @@ namespace path_tempo {
                 });
             }
 
-            localPieces.push_back({piece.id, piece.length, maximumVelocity, maximumAcceleration, maximumJerk});
+            localPieces.push_back({piece.id, piece.length, maximumVelocity, maximumAcceleration, maximumJerk, std::move(stations)});
 
             if (pieceIndex > 0) {
                 const auto &previous = request.pieces[pieceIndex - 1].stations.back();
@@ -124,10 +153,25 @@ namespace path_tempo {
                             .message = std::format("path pieces {} and {} are not tangent-continuous", pieceIndex - 1, pieceIndex),
                         });
                     }
+
+                    if (std::abs(previous.curvature[axis] - current.curvature[axis]) > 1e-8) {
+                        return std::unexpected(PlanningError {
+                            .code = PlanningErrorCode::InvalidInput,
+                            .message = std::format("path pieces {} and {} are not curvature-continuous", pieceIndex - 1, pieceIndex),
+                        });
+                    }
                 }
             }
         }
 
-        return solveLocal(localPieces, request.beginning, request.ending, request.settings);
+        CoupledLimits coupledLimits {
+            .pathAcceleration = request.limits.pathAcceleration,
+            .pathJerk = request.limits.pathJerk,
+            .axisVelocity = {request.limits.axisVelocity.begin(), request.limits.axisVelocity.end()},
+            .axisAcceleration = {request.limits.axisAcceleration.begin(), request.limits.axisAcceleration.end()},
+            .axisJerk = {request.limits.axisJerk.begin(), request.limits.axisJerk.end()},
+        };
+
+        return solveLocal(localPieces, request.beginning, request.ending, coupledLimits, request.settings);
     }
 }
