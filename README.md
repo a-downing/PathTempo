@@ -16,17 +16,19 @@ PathTempo is early-stage software and its public API is not yet stable.
 - globally positioned scalar cubic output preserving path-piece identity;
 - monotonicity and direction-reversal validation;
 - velocity-transition distance and reachability calculations;
-- line sampling into differential constraint stations; and
+- line and helical-arc sampling into differential constraint stations;
+- arbitrary-degree B-spline and positive-weight NURBS sampling, producing one path piece per non-empty knot interval;
+- caller-selected station counts for arcs and spline knot intervals;
+- sampling of caller-owned arc-length curves without replacing their geometry representation; and
 - a solver-neutral sparse linear-program interface with persistent HiGHS model updates, basis reuse, resource-limit classification, and primal extraction.
 
 ## Planned capabilities
 
-- arc, cubic-spline, and quintic-spline construction helpers with explicit sampling counts;
 - continuous geometric proof between differential stations.
 
 ## Design
 
-PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, maximum velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. Lines and arcs normally create one piece. For a B-spline, callers normally create one piece for each non-empty knot interval; the knot vector may be clamped or unclamped and uniform or non-uniform.
+PathTempo's path model represents geometry as ordered timing pieces. Each piece supplies its arc length, maximum velocity, and differential constraint stations containing `q'`, `q''`, and the full `q'''`. The geometry helpers create one piece for a line or helical arc and one piece for each non-empty B-spline or NURBS knot interval. Any positive spline degree is accepted; clamping and knot spacing are unrestricted. The non-rational B-spline overload is equivalent to supplying unit NURBS weights.
 
 `PathPlanner` solves ordered pieces with tangent- and curvature-continuous boundaries. It applies each piece's maximum velocity plus aggregate and per-coordinate limits, constructs a jerk-limited forward/backward velocity reference, and materializes every piece through Ruckig. Its HiGHS sequential program uses station velocity, acceleration, one-sided scalar jerk, and acceleration-deviation variables with linearized coupled endpoint constraints. Station-by-station line search accepts internal state changes only when adjacent Ruckig transitions remain feasible and no slower. Curved candidates are then checked at every supplied differential station using complete coupled acceleration and jerk. Violating pieces receive a bounded local time-scale correction and are re-solved. The result reports the effective velocity, acceleration, and jerk limits used for each piece after those corrections.
 

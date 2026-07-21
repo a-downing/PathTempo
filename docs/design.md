@@ -17,7 +17,7 @@ The target architecture includes:
 
 ## Path pieces
 
-A path piece is one timing interval. Lines and arcs normally produce one path piece. For a B-spline, callers normally produce one path piece for each non-empty knot interval, regardless of degree, clamping, or uniformity. Increasing sampling density inside a piece must not manufacture new semantic piece boundaries.
+A path piece is one timing interval. The geometry helpers produce one path piece for a line or helical arc and one path piece for each non-empty B-spline or positive-weight NURBS knot interval, regardless of degree, clamping, or uniformity. Increasing sampling density inside a piece must not manufacture new semantic piece boundaries.
 
 Each differential station contains local arc distance and the geometry-only coefficients needed to map scalar path motion into coordinate motion:
 
@@ -46,6 +46,8 @@ Coordinate materialization may discover an exact polynomial constraint violation
 `ScalarTransitionPlanner` calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation.
 
 `PathPlanner` calculates a continuous scalar time law across ordered C2 pieces. It constructs a velocity-cap reference with jerk-limited forward and backward reachability and uses `ScalarTransitionPlanner` to materialize each piece. HiGHS then proposes internal boundary velocity and acceleration changes using a local-duration objective, acceleration-deviation penalty, trust regions, and linearized coupled endpoint acceleration and full jerk constraints. One-sided scalar jerk variables establish endpoint jerk feasibility without making jerk a boundary state. A station-local working-set line search accepts a proposal only when both adjacent Ruckig transitions remain feasible and their combined duration does not increase. The output cubics use global path distance and retain their owning piece IDs.
+
+Geometry helpers sample lines, helical arcs, arbitrary-degree B-splines, and positive-weight NURBS into arc-length differential stations. Arc and spline callers select the number of intervals sampled inside each timing piece. A separate arc-length-curve helper accepts caller-owned geometry evaluators, allowing applications to retain an authoritative curve and inversion policy while using the same station construction contract.
 
 For curved pieces, PathTempo evaluates `q' v`, `q' a + q'' v^2`, and `q' j + 3 q'' v a + q''' v^3` at every supplied differential station and on both scalar phases when a station coincides with a phase boundary. A violation produces a per-piece time-scale correction that tightens scalar velocity, acceleration, and jerk by the corresponding first, second, and third powers before a bounded re-solve.
 

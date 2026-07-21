@@ -34,10 +34,10 @@ namespace path_tempo {
         };
 
         // Powers of two permit mask-based indexing. These sizes keep the common
-        // cache modest while reducing collisions for paths with over 1024 pieces.
+        // cache modest while reducing collisions once a path exceeds 256 pieces.
         constexpr std::size_t SMALL_TRANSITION_CACHE_SIZE = 32768;
         constexpr std::size_t LARGE_TRANSITION_CACHE_SIZE = 131072;
-        constexpr std::size_t LARGE_TRANSITION_CACHE_PIECE_THRESHOLD = 1024;
+        constexpr std::size_t LARGE_TRANSITION_CACHE_PIECE_THRESHOLD = 256;
         // Eight extra forward/backward passes let endpoint reductions propagate
         // beyond the theoretical two passes per piece before convergence testing.
         constexpr std::size_t REACHABILITY_EXTRA_PASSES = 8;

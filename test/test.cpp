@@ -76,6 +76,87 @@ namespace {
         require(nonFinite.error() == path_tempo::SamplingError::NonFiniteGeometry, "non-finite geometry should have a specific error");
     }
 
+    void testArcSampling() {
+        const path_tempo::Arc<3> arc {
+            .origin = {1.0, 0.0, 0.0},
+            .radial = {1.0, 0.0, 0.0},
+            .tangential = {0.0, 1.0, 0.0},
+            .axial = {0.0, 0.0, 2.0},
+            .sweep = std::numbers::pi / 2.0,
+        };
+        const auto sampled = path_tempo::sampleArc(arc, 10, 3.0, 16);
+
+        require(sampled.has_value(), "helical arc sampling should succeed");
+        require(sampled->stations.size() == 17, "arc sampling should honor its interval count");
+        require(std::abs(sampled->length - std::hypot(std::numbers::pi / 2.0, 2.0)) <= SOLVER_ENDPOINT_TOLERANCE, "helical arc sampling should integrate its spatial length");
+        require(sampled->stations.front().distance == 0.0 && sampled->stations.back().distance == sampled->length, "arc stations should cover the complete curve");
+    }
+
+    void testBSplineSampling() {
+        const std::array<path_tempo::Vector<3>, 7> controls {{
+            {0.0, 0.0, 0.0},
+            {1.0, 0.0, 0.0},
+            {2.0, 0.0, 0.0},
+            {3.0, 0.0, 0.0},
+            {4.0, 0.0, 0.0},
+            {5.0, 0.0, 0.0},
+            {6.0, 0.0, 0.0},
+        }};
+        const std::array knots {0.0, 0.0, 0.0, 0.0, 1.0, 2.0, 3.0, 4.0, 4.0, 4.0, 4.0};
+        const auto sampled = path_tempo::sampleBSpline(path_tempo::BSpline<3> {
+            .degree = 3,
+            .controls = controls,
+            .knots = knots,
+        }, 20, 2.0, 8);
+
+        require(sampled.has_value(), "cubic B-spline sampling should succeed");
+        require(sampled->size() == 4, "a cubic B-spline should produce one piece per non-empty knot interval");
+        require((*sampled)[0].id == 20 && (*sampled)[3].id == 23, "B-spline pieces should receive consecutive identities");
+        require(std::ranges::all_of(*sampled, [](const auto &piece) { return piece.stations.size() == 9; }), "every B-spline interval should honor the requested sample count");
+        const auto length = std::accumulate(sampled->begin(), sampled->end(), 0.0, [](const double total, const auto &piece) { return total + piece.length; });
+        require(std::abs(length - 6.0) <= SOLVER_ENDPOINT_TOLERANCE, "collinear B-spline intervals should cover the complete curve length");
+    }
+
+    void testUnclampedNonUniformBSplineSampling() {
+        const std::array<path_tempo::Vector<2>, 5> controls {{
+            {0.0, 0.0},
+            {1.0, 0.0},
+            {2.0, 0.0},
+            {3.0, 0.0},
+            {4.0, 0.0},
+        }};
+        const std::array knots {0.0, 0.5, 1.0, 2.0, 4.0, 5.0, 6.0, 7.0};
+        const auto sampled = path_tempo::sampleBSpline(path_tempo::BSpline<2> {
+            .degree = 2,
+            .controls = controls,
+            .knots = knots,
+        }, 24, 2.0, 4);
+
+        require(sampled.has_value(), "unclamped non-uniform B-spline sampling should succeed");
+        require(sampled->size() == 3, "an unclamped B-spline should still produce one piece per non-empty knot interval");
+        require((*sampled)[0].id == 24 && (*sampled)[2].id == 26, "unclamped B-spline pieces should receive consecutive identities");
+    }
+
+    void testNurbsSampling() {
+        const std::array<path_tempo::Vector<2>, 3> controls {{
+            {1.0, 0.0},
+            {1.0, 1.0},
+            {0.0, 1.0},
+        }};
+        const std::array weights {1.0, std::numbers::sqrt2 / 2.0, 1.0};
+        const std::array knots {0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+        const auto sampled = path_tempo::sampleNurbs(path_tempo::Nurbs<2> {
+            .degree = 2,
+            .controls = controls,
+            .weights = weights,
+            .knots = knots,
+        }, 30, 2.0, 16);
+
+        require(sampled.has_value(), "quadratic NURBS sampling should succeed");
+        require(sampled->size() == 1 && sampled->front().stations.size() == 17, "a single NURBS knot interval should produce one sampled piece");
+        require(std::abs(sampled->front().length - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE, "rational quarter-circle sampling should recover exact arc length");
+    }
+
     void testCubicTimeSegment() {
         const path_tempo::CubicTimeSegment segment {
             .piece = 4,
@@ -610,6 +691,10 @@ int main() {
     require(path_tempo::version() == "0.1.0", "version should match the project version");
     testLineSampling();
     testLineSamplingErrors();
+    testArcSampling();
+    testBSplineSampling();
+    testUnclampedNonUniformBSplineSampling();
+    testNurbsSampling();
     testCubicTimeSegment();
     testRestToRestTransition();
     testMovingBoundaryTransition();
