@@ -5,7 +5,7 @@ project(PathTempo VERSION 0.1.0 LANGUAGES CXX)
 include(CMakePackageConfigHelpers)
 include(CTest)
 
-option(PATH_TEMPO_USE_BUNDLED_DEPENDENCIES "Use the pinned HiGHS and Ruckig submodules" ON)
+option(PATH_TEMPO_USE_BUNDLED_DEPENDENCIES "Use the pinned Ruckig submodule" ON)
 
 function(path_tempo_force_o2_in_directory directory)
     get_property(targets DIRECTORY "${directory}" PROPERTY BUILDSYSTEM_TARGETS)
@@ -36,25 +36,8 @@ endfunction()
 
 function(path_tempo_resolve_dependencies)
     if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
-        # Keep implementation dependencies static and avoid HiGHS enabling
-        # toolchain-sensitive cross-language LTO for its Unix shared build.
+        # Keep the implementation dependency static.
         set(BUILD_SHARED_LIBS OFF)
-        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
-    endif()
-
-    if (NOT TARGET highs::highs)
-        if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
-            set(BUILD_CXX ON)
-            set(BUILD_CXX_EXE OFF)
-            set(BUILD_TESTING OFF)
-            set(BUILD_EXAMPLES OFF)
-            set(ZLIB OFF)
-            set(HIGHS_NO_DEFAULT_THREADS ON)
-            set(HIPO OFF)
-            add_subdirectory(third_party/highs EXCLUDE_FROM_ALL)
-        else()
-            find_package(highs CONFIG REQUIRED)
-        endif()
     endif()
 
     if (NOT TARGET ruckig::ruckig)
@@ -78,7 +61,6 @@ endfunction()
 path_tempo_resolve_dependencies()
 
 add_library(PathTempo STATIC
-    src/LinearOptimization.cpp
     src/Planner.cpp
     src/Version.cpp)
 add_library(PathTempo::PathTempo ALIAS PathTempo)
@@ -90,7 +72,6 @@ target_include_directories(PathTempo
         $<INSTALL_INTERFACE:include>)
 target_link_libraries(PathTempo
     PRIVATE
-        highs::highs
         ruckig::ruckig)
 
 if (MSVC)
@@ -125,8 +106,8 @@ else()
     target_compile_options(path_tempo_adaptive_pockets_example PRIVATE -Wall -Wextra)
 endif()
 
-# Bundled HiGHS and Ruckig are private implementation dependencies, but their
-# Debug defaults would otherwise be -O0. Apply only the optimization option to
+# Bundled Ruckig is a private implementation dependency, but its Debug default
+# would otherwise be -O0. Apply only the optimization option to
 # every local C/C++ target so Debug and Release both execute at -O2.
 path_tempo_force_o2_in_directory("${CMAKE_CURRENT_SOURCE_DIR}")
 

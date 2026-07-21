@@ -35,7 +35,7 @@ namespace path_tempo {
             });
         }
 
-        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || !std::isfinite(request.settings.linearSolveTimeLimit) || request.settings.linearSolveTimeLimit <= 0.0 || request.settings.simplexIterationLimit == 0 || request.settings.maximumCorrectionPasses == 0 || (request.settings.sequentialIterations > 0 && request.settings.lineSearchSteps == 0) || !std::isfinite(request.settings.velocityTrustFraction) || request.settings.velocityTrustFraction <= 0.0 || request.settings.velocityTrustFraction > 1.0 || !std::isfinite(request.settings.accelerationTrustFraction) || request.settings.accelerationTrustFraction <= 0.0 || request.settings.accelerationTrustFraction > 1.0) {
+        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || request.settings.maximumCorrectionPasses == 0) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::InvalidInput,
                 .message = "path planning received invalid boundary state or solver settings",

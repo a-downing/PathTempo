@@ -13,26 +13,9 @@
 
 namespace path_tempo {
     namespace detail {
-        // A quarter second bounds one LP solve without making the default
-        // unusably short for moderately sized paths.
-        inline constexpr double DEFAULT_LINEAR_SOLVE_TIME_LIMIT = 0.25;
-        // This is high enough for the sparse refinements seen in normal use
-        // while still bounding pathological simplex work.
-        inline constexpr std::size_t DEFAULT_SIMPLEX_ITERATION_LIMIT = 4096;
         // Sampled violations normally settle in one or two passes; eight
         // leaves headroom for coupled constraints without permitting a loop.
         inline constexpr std::size_t DEFAULT_MAXIMUM_CORRECTION_PASSES = 8;
-        // Four sequential convex refinements capture useful improvement while
-        // keeping solver cost predictable.
-        inline constexpr std::size_t DEFAULT_SEQUENTIAL_ITERATIONS = 4;
-        // Eight halvings can reduce a rejected full refinement to below 0.4%.
-        inline constexpr std::size_t DEFAULT_LINE_SEARCH_STEPS = 8;
-        // Velocity is the most sensitive refinement variable, so its trust
-        // region is limited to 15% of the station cap per iteration.
-        inline constexpr double DEFAULT_VELOCITY_TRUST_FRACTION = 0.15;
-        // Acceleration tolerates a wider 25% trust region while remaining close
-        // enough for the coupled-constraint linearization.
-        inline constexpr double DEFAULT_ACCELERATION_TRUST_FRACTION = 0.25;
     }
 
     double velocityTransitionDistance(double fromVelocity, double toVelocity, double acceleration, double jerk);
@@ -62,20 +45,8 @@ namespace path_tempo {
     };
 
     struct PathPlanningSettings {
-        double linearSolveTimeLimit = detail::DEFAULT_LINEAR_SOLVE_TIME_LIMIT;
-        std::size_t simplexIterationLimit = detail::DEFAULT_SIMPLEX_ITERATION_LIMIT;
         std::size_t maximumCorrectionPasses = detail::DEFAULT_MAXIMUM_CORRECTION_PASSES;
-        std::size_t sequentialIterations = detail::DEFAULT_SEQUENTIAL_ITERATIONS;
-        std::size_t lineSearchSteps = detail::DEFAULT_LINE_SEARCH_STEPS;
-        double velocityTrustFraction = detail::DEFAULT_VELOCITY_TRUST_FRACTION;
-        double accelerationTrustFraction = detail::DEFAULT_ACCELERATION_TRUST_FRACTION;
         bool applySampledCorrections = true;
-    };
-
-    enum class PlanningResourceLimit {
-        None,
-        Time,
-        SimplexIterations,
     };
 
     template<std::size_t DoF>
@@ -88,23 +59,10 @@ namespace path_tempo {
     };
 
     struct PathPlanningDiagnostics {
-        std::size_t linearSolverIterations = 0;
-        bool linearSolverBasisReused = false;
         double velocitySeedDuration = 0.0;
         std::size_t correctionPasses = 0;
         std::size_t correctedPieces = 0;
         double maximumAppliedTimeScale = 1.0;
-        std::size_t sequentialSolves = 0;
-        std::size_t lineSearchTrials = 0;
-        std::size_t acceptedRefinements = 0;
-        std::size_t transitionRequests = 0;
-        std::size_t transitionSolverCalls = 0;
-        std::size_t transitionCacheHits = 0;
-        std::size_t transitionCacheFailureHits = 0;
-        std::size_t transitionCacheMaterializations = 0;
-        PlanningResourceLimit resourceLimit = PlanningResourceLimit::None;
-        std::size_t resourceLimitOccurrences = 0;
-        std::size_t firstResourceLimitedSequentialIteration = 0;
     };
 
     struct PlannedPath {

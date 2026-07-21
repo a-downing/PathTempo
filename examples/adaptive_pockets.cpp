@@ -303,16 +303,6 @@ namespace {
         return std::format("geometry sampling failed with code {}", static_cast<int>(error));
     }
 
-    std::string_view resourceLimitName(const path_tempo::PlanningResourceLimit limit) {
-        switch (limit) {
-            case path_tempo::PlanningResourceLimit::None: return "none";
-            case path_tempo::PlanningResourceLimit::Time: return "time";
-            case path_tempo::PlanningResourceLimit::SimplexIterations: return "simplex iterations";
-        }
-
-        return "unknown";
-    }
-
     std::expected<std::vector<path_tempo::SampledPathPiece<DOF>>, std::string> sampleGeometry(const path_tempo::example::GeometryFile &geometry) {
         const auto pieceCapacity = std::accumulate(geometry.curves.begin(), geometry.curves.end(), std::size_t {0},
             [](const std::size_t total, const auto &curve) { return total + curve.feeds.size(); });
@@ -461,9 +451,6 @@ int main(const int argc, char **argv) {
     std::println("loaded {} curves as {} PathPieces; path length: {:.6f} {}", geometry->curves.size(), pieces.size(), pathLength, unit);
 
     path_tempo::PathPlanningSettings settings;
-    settings.linearSolveTimeLimit = 0.000000001;
-    settings.simplexIterationLimit = 1'000'000;
-    settings.sequentialIterations = 1;
     settings.applySampledCorrections = true;
 
     path_tempo::PathPlanner planner;
@@ -489,11 +476,6 @@ int main(const int argc, char **argv) {
     std::println("trajectory duration: {:.6f} s", trajectoryDuration);
     std::println("cubic time segments: {}", planned->timeLaw.segments.size());
     std::println("sampled correction passes: {}", planned->diagnostics.correctionPasses);
-    std::println("linear solver resource limit: {}", resourceLimitName(planned->diagnostics.resourceLimit));
-    std::println("linear solver resource-limit occurrences: {}", planned->diagnostics.resourceLimitOccurrences);
-    std::println("sequential linear solves: {}", planned->diagnostics.sequentialSolves);
-    std::println("accepted sequential refinements: {}", planned->diagnostics.acceptedRefinements);
-    std::println("linear solver simplex iterations: {}", planned->diagnostics.linearSolverIterations);
     std::println("planning wall time: {:.6f} s", planningSeconds);
 
     return 0;

@@ -10,7 +10,6 @@ The target architecture includes:
 - differential constraint stations;
 - common geometry sampling helpers;
 - forward and backward reachability;
-- HiGHS-backed sequential convex programming;
 - Ruckig-backed local state transitions;
 - correction-pass state and reusable solver workspaces; and
 - scalar time-domain cubic path-position output.
@@ -39,24 +38,22 @@ A planning window begins and ends with scalar velocity and acceleration. Positio
 
 The multi-piece output is a sequence of cubic scalar path-position segments in physical time. Every segment belongs to exactly one path piece.
 
-Coordinate materialization may discover an exact polynomial constraint violation. The optional `MaterializationCorrection` callback receives the complete candidate and returns required time-scale corrections for owning path pieces. PathTempo validates piece identity and scale values, combines those requests with any enabled sampled corrections, tightens local velocity, acceleration, and jerk limits, and re-solves while retaining reusable HiGHS and Ruckig state. Geometry-tolerance failures that can be repaired by subdividing coordinate cubics do not require a scalar re-solve.
+Coordinate materialization may discover an exact polynomial constraint violation. The optional `MaterializationCorrection` callback receives the complete candidate and returns required time-scale corrections for owning path pieces. PathTempo validates piece identity and scale values, combines those requests with any enabled sampled corrections, tightens local velocity, acceleration, and jerk limits, and re-solves while retaining its reusable Ruckig state. Geometry-tolerance failures that can be repaired by subdividing coordinate cubics do not require a scalar re-solve.
 
 ## Current implementation
 
 `ScalarTransitionPlanner` calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation.
 
-`PathPlanner` calculates a continuous scalar time law across ordered C2 pieces. It constructs a velocity-cap reference with jerk-limited forward and backward reachability and uses `ScalarTransitionPlanner` to materialize each piece. HiGHS then proposes internal boundary velocity and acceleration changes using a local-duration objective, acceleration-deviation penalty, trust regions, and linearized coupled endpoint acceleration and full jerk constraints. One-sided scalar jerk variables establish endpoint jerk feasibility without making jerk a boundary state. A station-local working-set line search accepts a proposal only when both adjacent Ruckig transitions remain feasible and their combined duration does not increase. The output cubics use global path distance and retain their owning piece IDs.
+`PathPlanner` calculates a continuous scalar time law across ordered C2 pieces. It constructs internal boundary velocities with jerk-limited forward and backward reachability, assigns zero scalar acceleration at internal boundaries, and uses `ScalarTransitionPlanner` to materialize each piece. The requested beginning and ending acceleration remain fixed. The output cubics use global path distance and retain their owning piece IDs.
 
 Geometry helpers sample lines, helical arcs, arbitrary-degree B-splines, and positive-weight NURBS into arc-length differential stations. Arc and spline callers select the number of intervals sampled inside each timing piece. A separate arc-length-curve helper accepts caller-owned geometry evaluators, allowing applications to retain an authoritative curve and inversion policy while using the same station construction contract.
 
 For curved pieces, PathTempo evaluates `q' v`, `q' a + q'' v^2`, and `q' j + 3 q'' v a + q''' v^3` at every supplied differential station and on both scalar phases when a station coincides with a phase boundary. A violation produces a per-piece time-scale correction that tightens scalar velocity, acceleration, and jerk by the corresponding first, second, and third powers before a bounded re-solve.
 
-Applications with a stronger continuous coordinate-polynomial proof may disable sampled correction while retaining the differential stations for initial limits and coupled endpoint refinement. Scalar line-search candidates use a thread-local exact-key duration/failure cache; an accepted cached duration is always rematerialized through Ruckig before it enters the returned time law.
-
-`PersistentLinearSolver` owns HiGHS model storage, structure-stable updates, basis reuse, resource-limit classification, and primal extraction. Callers build a solver-neutral row-wise `SparseLinearProgram`; no HiGHS type crosses the public boundary.
+Applications with a stronger continuous coordinate-polynomial proof may disable sampled correction while retaining the differential stations for initial limits and sampled coupled checks performed by that stronger proof.
 
 Velocity-transition distance and reachable-velocity helpers are implemented. Differential stations remain discrete constraints, not continuous proof between samples. PathTempo provides the correction callback but leaves coordinate-polynomial materialization and continuous proof to the caller.
 
 ## Dependencies
 
-HiGHS and Ruckig are unmodified upstream dependencies and remain private to the implementation. Source builds use pinned Git submodules by default. Parent-provided or installed CMake package targets are also supported.
+Ruckig is an unmodified upstream dependency and remains private to the implementation. Source builds use the pinned Git submodule by default. A parent-provided or installed CMake package target is also supported.

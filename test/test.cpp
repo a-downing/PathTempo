@@ -8,7 +8,6 @@
 #include <vector>
 
 #include "path_tempo/Sampling.h"
-#include "path_tempo/LinearOptimization.h"
 #include "path_tempo/Planner.h"
 #include "path_tempo/Types.h"
 #include "path_tempo/Version.h"
@@ -261,42 +260,6 @@ namespace {
         require(transition.error().code == path_tempo::PlanningErrorCode::InvalidInput, "invalid transition should return a typed input error");
     }
 
-    void testPersistentLinearOptimization() {
-        path_tempo::PersistentLinearSolver solver;
-        const auto configured = solver.configure(0.5);
-
-        require(configured.has_value(), "persistent linear solver should configure");
-
-        path_tempo::SparseLinearProgram first(2);
-        first.columnLower(0) = 0.0;
-        first.columnLower(1) = 0.0;
-        first.columnCost(0) = 1.0;
-        first.columnCost(1) = 2.0;
-        first.addRow(3.0, path_tempo::linearProgramInfinity(), {{0, 1.0}, {1, 1.0}});
-        const auto initial = solver.solve(first, {.simplexIterationLimit = 128});
-
-        require(initial.has_value(), "initial linear program should solve");
-        require(initial->status == path_tempo::LinearSolveStatus::Optimal, "initial linear program should be optimal");
-        require(initial->values.size() == 2, "linear solution should contain every column");
-        require(std::abs(initial->values[0] - 3.0) <= SOLVER_ENDPOINT_TOLERANCE, "linear solution should select the cheaper first column");
-        require(std::abs(initial->values[1]) <= SOLVER_ENDPOINT_TOLERANCE, "linear solution should leave the expensive second column at zero");
-
-        path_tempo::SparseLinearProgram updated(2);
-        updated.columnLower(0) = 0.0;
-        updated.columnLower(1) = 0.0;
-        updated.columnCost(0) = 2.0;
-        updated.columnCost(1) = 1.0;
-        updated.addRow(3.0, path_tempo::linearProgramInfinity(), {{0, 1.0}, {1, 1.0}});
-        const auto resolved = solver.solve(updated, {.simplexIterationLimit = 128});
-
-        require(resolved.has_value(), "updated linear program should solve");
-        require(resolved->status == path_tempo::LinearSolveStatus::Optimal, "updated linear program should be optimal");
-        require(resolved->diagnostics.modelUpdateAttempted, "second structure-stable solve should attempt a model update");
-        require(resolved->diagnostics.modelUpdateApplied, "second structure-stable solve should update the persistent model");
-        require(std::abs(resolved->values[0]) <= SOLVER_ENDPOINT_TOLERANCE, "updated solution should leave the expensive first column at zero");
-        require(std::abs(resolved->values[1] - 3.0) <= SOLVER_ENDPOINT_TOLERANCE, "updated solution should select the cheaper second column");
-    }
-
     void testVelocityReachability() {
         const auto transitionDistance = path_tempo::velocityTransitionDistance(0.0, 2.0, 1.0, 2.0);
 
@@ -397,7 +360,7 @@ namespace {
         });
 
         require(replanned.has_value(), "a repeated path solve should succeed");
-        require(replanned->diagnostics.linearSolverBasisReused, "a repeated path solve should reuse the HiGHS basis");
+        require(!replanned->timeLaw.segments.empty(), "a repeated path solve should produce a scalar time law");
     }
 
     void testMultiPiecePathRejectsTangentDiscontinuity() {
@@ -472,8 +435,6 @@ namespace {
             .ending = {},
             .limits = limits,
             .settings = {
-                .linearSolveTimeLimit = 0.25,
-                .simplexIterationLimit = 4096,
                 .maximumCorrectionPasses = 12,
             },
         });
@@ -552,7 +513,7 @@ namespace {
         require(planned.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an infeasible curved boundary should be an input error");
     }
 
-    void testMultiPieceCurvedRefinement() {
+    void testMultiPieceCurvedPlanning() {
         const auto first = sampledUnitCircleInterval(71, 0.0, std::numbers::pi / 4.0, 2.0, 16);
         const auto second = sampledUnitCircleInterval(72, std::numbers::pi / 4.0, std::numbers::pi / 2.0, 2.0, 16);
         const std::array pieces {first.view(), second.view()};
@@ -573,7 +534,8 @@ namespace {
 
         require(planned.has_value(), "a C2 two-piece curved chain should solve");
         require(planned->pieceBoundaries[1].velocity > 0.0, "a curved internal boundary should retain continuous motion");
-        require(planned->diagnostics.sequentialSolves >= 1, "a multi-piece curved path should run coupled sequential refinement");
+        require(std::abs(planned->pieceBoundaries[1].acceleration) <= TIME_LAW_CONTINUITY_TOLERANCE,
+            "a curved internal boundary should use zero scalar acceleration");
 
         auto previousDistance = 0.0;
         auto previousVelocity = 0.0;
@@ -603,8 +565,7 @@ namespace {
         });
 
         require(repeated.has_value(), "a repeated curved path should solve");
-        require(repeated->diagnostics.transitionCacheHits > 0, "a repeated curved path should reuse scalar transition candidates");
-        require(repeated->diagnostics.transitionCacheMaterializations <= repeated->diagnostics.transitionCacheHits, "only accepted cached candidates should require exact rematerialization");
+        require(!repeated->timeLaw.segments.empty(), "a repeated curved path should produce a scalar time law");
     }
 
     void testCurvedMovingBoundaryStates() {
@@ -686,7 +647,6 @@ namespace {
         require(invalid.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an invalid materialization correction should return an input error");
     }
 }
-
 int main() {
     require(path_tempo::version() == "0.1.0", "version should match the project version");
     testLineSampling();
@@ -700,13 +660,12 @@ int main() {
     testMovingBoundaryTransition();
     testUnboundedAccelerationCruise();
     testInvalidTransition();
-    testPersistentLinearOptimization();
     testVelocityReachability();
     testMultiPiecePathPlanning();
     testMultiPiecePathRejectsTangentDiscontinuity();
     testCurvedPathPlanning();
     testCurvedBoundaryRejectsGeometricJerkViolation();
-    testMultiPieceCurvedRefinement();
+    testMultiPieceCurvedPlanning();
     testCurvedMovingBoundaryStates();
     testMaterializationCorrectionCallback();
 }

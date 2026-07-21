@@ -1,8 +1,8 @@
 # PathTempo Repository Guide
 
-PathTempo is a C++23 library for jerk-limited timing of fixed geometric paths. Keep the public API independent of CNC, G-code, HiGHS, and Ruckig types. HiGHS and Ruckig are private implementation dependencies.
+PathTempo is a C++23 library for jerk-limited timing of fixed geometric paths. Keep the public API independent of CNC, G-code, and Ruckig types. Ruckig is a private implementation dependency.
 
-Apply optimization target-by-target so every locally compiled C/C++ target, including bundled HiGHS and Ruckig, uses `-O2` in both Debug and Release builds. Do not leak warning or debug-symbol flags into dependencies.
+Apply optimization target-by-target so every locally compiled C/C++ target, including bundled Ruckig, uses `-O2` in both Debug and Release builds. Do not leak warning or debug-symbol flags into dependencies.
 
 Follow [docs/cpp_style.md](docs/cpp_style.md) for all new and modified C++ code. Preserve unrelated changes and add focused tests for every behavioral change.
 
