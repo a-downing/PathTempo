@@ -8,6 +8,13 @@ include(CTest)
 option(PATH_TEMPO_USE_BUNDLED_DEPENDENCIES "Use the pinned HiGHS and Ruckig submodules" ON)
 
 function(path_tempo_resolve_dependencies)
+    if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
+        # Keep implementation dependencies static and avoid HiGHS enabling
+        # toolchain-sensitive cross-language LTO for its Unix shared build.
+        set(BUILD_SHARED_LIBS OFF)
+        set(CMAKE_INTERPROCEDURAL_OPTIMIZATION OFF)
+    endif()
+
     if (NOT TARGET highs::highs)
         if (PATH_TEMPO_USE_BUNDLED_DEPENDENCIES)
             set(BUILD_CXX ON)
@@ -30,7 +37,6 @@ function(path_tempo_resolve_dependencies)
             set(BUILD_CLOUD_CLIENT OFF)
             set(BUILD_TESTS OFF)
             set(BUILD_BENCHMARK OFF)
-            set(BUILD_SHARED_LIBS OFF)
             add_subdirectory(third_party/ruckig EXCLUDE_FROM_ALL)
 
             if (WIN32)
