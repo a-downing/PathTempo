@@ -9,6 +9,8 @@
 
 #include <ruckig/ruckig.hpp>
 
+#include "path_tempo/LinearOptimization.h"
+
 namespace path_tempo {
     double velocityTransitionDistance(const double fromVelocity, const double toVelocity, const double acceleration, const double jerk) {
         const auto change = std::abs(toVelocity - fromVelocity);
@@ -54,6 +56,11 @@ namespace path_tempo {
         ruckig::InputParameter<1> input;
         ruckig::Ruckig<1> generator;
         ruckig::Trajectory<1> trajectory;
+    };
+
+    struct PathPlanner::Implementation {
+        ScalarTransitionPlanner transitionPlanner;
+        PersistentLinearSolver linearSolver;
     };
 
     std::size_t ScalarTransition::size() const noexcept {
@@ -259,6 +266,174 @@ namespace path_tempo {
 
             previousTime = time;
             previousDistance = phaseDistance;
+        }
+
+        return result;
+    }
+
+    PathPlanner::PathPlanner() : m_implementation(std::make_unique<Implementation>()) {
+    }
+
+    PathPlanner::~PathPlanner() = default;
+
+    PathPlanner::PathPlanner(PathPlanner &&) noexcept = default;
+
+    PathPlanner &PathPlanner::operator=(PathPlanner &&) noexcept = default;
+
+    std::expected<PlannedPath, PlanningError> PathPlanner::solveLocal(const std::span<const LocalPiece> pieces, const BoundaryState beginning, const BoundaryState ending, const PathPlanningSettings &settings) {
+        const auto stationCount = pieces.size() + 1;
+        std::vector<double> stationCaps(stationCount, std::numeric_limits<double>::infinity());
+        stationCaps.front() = beginning.velocity;
+        stationCaps.back() = ending.velocity;
+
+        for (std::size_t station = 1; station + 1 < stationCount; ++station) {
+            stationCaps[station] = std::min(pieces[station - 1].maximumVelocity, pieces[station].maximumVelocity);
+        }
+
+        if (beginning.velocity > pieces.front().maximumVelocity * (1.0 + 1e-10) || ending.velocity > pieces.back().maximumVelocity * (1.0 + 1e-10) || std::abs(beginning.acceleration) > pieces.front().maximumAcceleration * (1.0 + 1e-10) || std::abs(ending.acceleration) > pieces.back().maximumAcceleration * (1.0 + 1e-10)) {
+            return std::unexpected(PlanningError {
+                .code = PlanningErrorCode::InvalidInput,
+                .message = "path boundary state exceeds a local piece limit",
+            });
+        }
+
+        SparseLinearProgram envelope(stationCount);
+
+        for (std::size_t station = 0; station < stationCount; ++station) {
+            const auto capSquared = stationCaps[station] * stationCaps[station];
+            envelope.columnCost(station) = station == 0 || station + 1 == stationCount ? 0.0 : -1.0;
+            envelope.columnLower(station) = capSquared;
+            envelope.columnUpper(station) = capSquared;
+
+            if (station > 0 && station + 1 < stationCount) {
+                envelope.columnLower(station) = 0.0;
+            }
+        }
+
+        for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+            const auto maximumEnergyChange = 2.0 * pieces[pieceIndex].maximumAcceleration * pieces[pieceIndex].length;
+            envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex + 1, 1.0}, {pieceIndex, -1.0}});
+            envelope.addRow(-linearProgramInfinity(), maximumEnergyChange, {{pieceIndex, 1.0}, {pieceIndex + 1, -1.0}});
+        }
+
+        if (auto configured = m_implementation->linearSolver.configure(settings.linearSolveTimeLimit); !configured) {
+            return std::unexpected(PlanningError {
+                .code = PlanningErrorCode::SolverFailure,
+                .message = std::format("could not configure the path velocity-envelope solver: {}", configured.error()),
+            });
+        }
+
+        const auto solved = m_implementation->linearSolver.solve(envelope, {
+            .simplexIterationLimit = settings.simplexIterationLimit,
+        });
+
+        if (!solved) {
+            return std::unexpected(PlanningError {
+                .code = PlanningErrorCode::SolverFailure,
+                .message = std::format("path velocity-envelope solve failed: {}", solved.error()),
+            });
+        }
+
+        if (solved->status != LinearSolveStatus::Optimal) {
+            return std::unexpected(PlanningError {
+                .code = PlanningErrorCode::SolverFailure,
+                .message = solved->status == LinearSolveStatus::TimeLimit ? "path velocity-envelope solve reached its time limit" : "path velocity-envelope solve reached its iteration limit",
+            });
+        }
+
+        std::vector<double> stationVelocity(stationCount);
+
+        for (std::size_t station = 0; station < stationCount; ++station) {
+            stationVelocity[station] = std::sqrt(std::clamp(solved->values[station], 0.0, stationCaps[station] * stationCaps[station]));
+        }
+
+        stationVelocity.front() = beginning.velocity;
+        stationVelocity.back() = ending.velocity;
+        const auto reachabilityPasses = 2 * pieces.size() + 8;
+
+        for (std::size_t pass = 0; pass < reachabilityPasses; ++pass) {
+            auto maximumChange = 0.0;
+
+            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                const auto reachable = reachableVelocity(stationVelocity[pieceIndex], std::min(stationCaps[pieceIndex + 1], pieces[pieceIndex].maximumVelocity), pieces[pieceIndex].length, pieces[pieceIndex].maximumAcceleration, pieces[pieceIndex].maximumJerk);
+
+                if (pieceIndex + 1 == pieces.size()) {
+                    if (reachable + 1e-10 < ending.velocity) {
+                        return std::unexpected(PlanningError {
+                            .code = PlanningErrorCode::SolverFailure,
+                            .message = "fixed ending velocity is not forward reachable",
+                        });
+                    }
+                } else {
+                    const auto reduced = std::min(stationVelocity[pieceIndex + 1], reachable);
+                    maximumChange = std::max(maximumChange, stationVelocity[pieceIndex + 1] - reduced);
+                    stationVelocity[pieceIndex + 1] = reduced;
+                }
+            }
+
+            for (std::size_t pieceIndex = pieces.size(); pieceIndex-- > 0;) {
+                const auto reachable = reachableVelocity(stationVelocity[pieceIndex + 1], std::min(stationCaps[pieceIndex], pieces[pieceIndex].maximumVelocity), pieces[pieceIndex].length, pieces[pieceIndex].maximumAcceleration, pieces[pieceIndex].maximumJerk);
+
+                if (pieceIndex == 0) {
+                    if (reachable + 1e-10 < beginning.velocity) {
+                        return std::unexpected(PlanningError {
+                            .code = PlanningErrorCode::SolverFailure,
+                            .message = "fixed beginning velocity cannot reach the remaining path",
+                        });
+                    }
+                } else {
+                    const auto reduced = std::min(stationVelocity[pieceIndex], reachable);
+                    maximumChange = std::max(maximumChange, stationVelocity[pieceIndex] - reduced);
+                    stationVelocity[pieceIndex] = reduced;
+                }
+            }
+
+            if (maximumChange <= 1e-11) {
+                break;
+            }
+        }
+
+        PlannedPath result;
+        result.timeLaw.beginning = beginning;
+        result.timeLaw.ending = ending;
+        result.pieceBoundaries.resize(stationCount);
+        result.pieceBoundaries.front() = beginning;
+        result.pieceBoundaries.back() = ending;
+        result.diagnostics.linearSolverIterations = solved->diagnostics.simplexIterations;
+        result.diagnostics.linearSolverBasisReused = solved->diagnostics.basisReuseApplied;
+        auto pathDistance = 0.0;
+
+        for (std::size_t station = 1; station + 1 < stationCount; ++station) {
+            result.pieceBoundaries[station] = {.velocity = stationVelocity[station]};
+        }
+
+        for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+            const auto &piece = pieces[pieceIndex];
+            const auto transition = m_implementation->transitionPlanner.solve({
+                .piece = piece.id,
+                .length = piece.length,
+                .beginning = result.pieceBoundaries[pieceIndex],
+                .ending = result.pieceBoundaries[pieceIndex + 1],
+                .maximumVelocity = piece.maximumVelocity,
+                .maximumAcceleration = piece.maximumAcceleration,
+                .maximumJerk = piece.maximumJerk,
+            });
+
+            if (!transition) {
+                return std::unexpected(PlanningError {
+                    .code = transition.error().code,
+                    .message = std::format("could not materialize path piece {}: {}", pieceIndex, transition.error().message),
+                });
+            }
+
+            result.diagnostics.velocitySeedDuration += transition->duration();
+
+            for (auto segment : *transition) {
+                segment.c0 += pathDistance;
+                result.timeLaw.segments.push_back(segment);
+            }
+
+            pathDistance += piece.length;
         }
 
         return result;

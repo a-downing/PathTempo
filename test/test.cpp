@@ -3,6 +3,7 @@
 #include <iostream>
 #include <limits>
 #include <string_view>
+#include <vector>
 
 #include "path_tempo/Sampling.h"
 #include "path_tempo/LinearOptimization.h"
@@ -204,6 +205,121 @@ namespace {
         require(reachable > 0.0 && reachable < 2.0, "a short piece should reduce its reachable velocity cap");
         require(path_tempo::velocityTransitionDistance(0.0, reachable, 1.0, 2.0) <= 1.0, "reachable velocity should fit within the available distance");
     }
+
+    path_tempo::Limits<3> testPathLimits() {
+        return {
+            .pathAcceleration = 2.0,
+            .pathJerk = 5.0,
+            .axisVelocity = {4.0, 4.0, 4.0},
+            .axisAcceleration = {2.0, 2.0, 2.0},
+            .axisJerk = {5.0, 5.0, 5.0},
+        };
+    }
+
+    void testMultiPiecePathPlanning() {
+        const auto first = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {0.0, 0.0, 0.0},
+            .to = {10.0, 0.0, 0.0},
+        }, 31, 3.0);
+        const auto second = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {10.0, 0.0, 0.0},
+            .to = {20.0, 0.0, 0.0},
+        }, 32, 1.5);
+
+        require(first.has_value() && second.has_value(), "multi-piece test lines should sample");
+
+        const std::array pieces {first->view(), second->view()};
+        path_tempo::PathPlanner planner;
+        const auto planned = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        });
+
+        require(planned.has_value(), "a continuous two-piece line path should solve");
+        require(!planned->timeLaw.segments.empty(), "multi-piece planning should produce cubic segments");
+        require(planned->pieceBoundaries.size() == 3, "two pieces should produce three boundary states");
+        require(planned->pieceBoundaries[1].velocity > 0.0, "continuous planning should retain motion at an internal boundary");
+        require(planned->pieceBoundaries[1].velocity <= 1.5 + 1e-10, "an internal boundary should honor both programmed velocities");
+        require(planned->diagnostics.velocitySeedDuration > 0.0, "multi-piece planning should report its materialized duration");
+
+        auto previousDistance = 0.0;
+        auto previousVelocity = 0.0;
+        auto previousAcceleration = 0.0;
+        auto sawFirstPiece = false;
+        auto sawSecondPiece = false;
+
+        for (const auto &segment : planned->timeLaw.segments) {
+            require(std::abs(segment.position(0.0) - previousDistance) <= 1e-8, "multi-piece cubics should be globally position-continuous");
+            require(std::abs(segment.velocity(0.0) - previousVelocity) <= 1e-8, "multi-piece cubics should be velocity-continuous");
+            require(std::abs(segment.acceleration(0.0) - previousAcceleration) <= 1e-8, "multi-piece cubics should be acceleration-continuous");
+            require(std::abs(segment.jerk()) <= 5.0 + 1e-10, "multi-piece cubics should obey the scalar and axis jerk limit");
+
+            const auto maximumProgrammedVelocity = segment.piece == 31 ? 3.0 : 1.5;
+            auto maximumSegmentVelocity = std::max(segment.velocity(0.0), segment.velocity(segment.duration));
+
+            if (std::abs(segment.jerk()) > 1e-15) {
+                const auto velocityExtremum = -segment.acceleration(0.0) / segment.jerk();
+
+                if (velocityExtremum > 0.0 && velocityExtremum < segment.duration) {
+                    maximumSegmentVelocity = std::max(maximumSegmentVelocity, segment.velocity(velocityExtremum));
+                }
+            }
+
+            require(maximumSegmentVelocity <= maximumProgrammedVelocity + 1e-9, "multi-piece cubics should obey each programmed velocity");
+            require(std::abs(segment.acceleration(0.0)) <= 2.0 + 1e-9 && std::abs(segment.acceleration(segment.duration)) <= 2.0 + 1e-9, "multi-piece cubics should obey the scalar and axis acceleration limit");
+
+            previousDistance = segment.position(segment.duration);
+            previousVelocity = segment.velocity(segment.duration);
+            previousAcceleration = segment.acceleration(segment.duration);
+            sawFirstPiece = sawFirstPiece || segment.piece == 31;
+            sawSecondPiece = sawSecondPiece || segment.piece == 32;
+        }
+
+        require(sawFirstPiece && sawSecondPiece, "multi-piece segments should preserve each piece identity");
+        require(std::abs(previousDistance - 20.0) <= 1e-8, "multi-piece planning should cover the complete path distance");
+        require(std::abs(previousVelocity) <= 1e-8, "rest-to-rest multi-piece planning should end at rest");
+        require(std::abs(previousAcceleration) <= 1e-8, "rest-to-rest multi-piece planning should end at zero acceleration");
+
+        const auto replanned = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        });
+
+        require(replanned.has_value(), "a repeated path solve should succeed");
+        require(replanned->diagnostics.linearSolverBasisReused, "a repeated path solve should reuse the HiGHS basis");
+    }
+
+    void testMultiPiecePathRejectsTangentDiscontinuity() {
+        const auto first = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {0.0, 0.0, 0.0},
+            .to = {2.0, 0.0, 0.0},
+        }, 41, 1.0);
+        const auto second = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {2.0, 0.0, 0.0},
+            .to = {2.0, 2.0, 0.0},
+        }, 42, 1.0);
+
+        require(first.has_value() && second.has_value(), "discontinuous test lines should sample");
+
+        const std::array pieces {first->view(), second->view()};
+        path_tempo::PathPlanner planner;
+        const auto planned = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        });
+
+        require(!planned.has_value(), "multi-piece planning should reject a tangent discontinuity");
+        require(planned.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a tangent discontinuity should be an input error");
+    }
 }
 
 int main() {
@@ -217,4 +333,6 @@ int main() {
     testInvalidTransition();
     testPersistentLinearOptimization();
     testVelocityReachability();
+    testMultiPiecePathPlanning();
+    testMultiPiecePathRejectsTangentDiscontinuity();
 }

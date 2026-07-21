@@ -45,9 +45,11 @@ Coordinate materialization may discover an exact polynomial constraint violation
 
 `ScalarTransitionPlanner` calculates one fixed-distance transition between scalar velocity/acceleration boundary states, validates monotonic forward motion, and returns its constant-jerk phases as physical-time cubic path-position segments. Its fixed-capacity result and reusable private workspace avoid per-call allocation.
 
+`PathPlanner` calculates a continuous scalar time law across ordered straight, tangent-continuous pieces. It uses HiGHS to maximize a squared-velocity envelope subject to local velocity and acceleration reachability, applies jerk-limited forward and backward tightening, and uses `ScalarTransitionPlanner` to materialize each piece. The output cubics use global path distance and retain their owning piece IDs. Aggregate and per-coordinate limits reduce to exact scalar limits for the currently supported straight geometry.
+
 `PersistentLinearSolver` owns HiGHS model storage, structure-stable updates, basis reuse, resource-limit classification, and primal extraction. Callers build a solver-neutral row-wise `SparseLinearProgram`; no HiGHS type crosses the public boundary.
 
-Velocity-transition distance and reachable-velocity helpers are implemented. Multi-piece planning, coupled-constraint linearization, line search, and materialization correction orchestration are not yet implemented.
+Velocity-transition distance and reachable-velocity helpers are implemented. Curved-piece coupled-constraint linearization, line search, and materialization correction orchestration are not yet implemented. Curved pieces are rejected rather than being planned with incomplete guarantees.
 
 ## Dependencies
 
