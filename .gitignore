@@ -1,4 +1,7 @@
 /build/
 /out/
 /.cache/
+/.audit-*/
+/.current-build/
+*.obj
 CMakeUserPresets.json

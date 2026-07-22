@@ -1,7 +1,6 @@
 #pragma once
 
 #include <array>
-#include <cmath>
 #include <cstddef>
 #include <cstdint>
 #include <limits>
@@ -71,7 +70,6 @@ namespace path_tempo {
         double c1 = 0.0;
         double c2 = 0.0;
         double c3 = 0.0;
-        bool initialStateCorrection = false;
 
         double position(const double time) const {
             return ((c3 * time + c2) * time + c1) * time + c0;

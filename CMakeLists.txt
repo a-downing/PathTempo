@@ -33,9 +33,12 @@ endfunction()
 
 path_tempo_resolve_dependencies()
 
+file(MAKE_DIRECTORY "${CMAKE_CURRENT_BINARY_DIR}/generated")
+configure_file(src/Version.cpp.in "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.cpp" @ONLY)
+
 add_library(PathTempo STATIC
     src/Planner.cpp
-    src/Version.cpp)
+    "${CMAKE_CURRENT_BINARY_DIR}/generated/Version.cpp")
 add_library(PathTempo::PathTempo ALIAS PathTempo)
 
 target_compile_features(PathTempo PUBLIC cxx_std_23)
@@ -56,6 +59,7 @@ endif()
 if (BUILD_TESTING)
     add_executable(path_tempo_tests test/test.cpp)
     target_link_libraries(path_tempo_tests PRIVATE PathTempo::PathTempo)
+    target_compile_definitions(path_tempo_tests PRIVATE PATH_TEMPO_EXPECTED_VERSION=\"${PROJECT_VERSION}\")
 
     add_executable(path_tempo_continuous_path_options_tests
         test/continuous_path_options_test.cpp
@@ -67,22 +71,30 @@ if (BUILD_TESTING)
         examples/endpoint_exact_arc.cpp)
     target_link_libraries(path_tempo_endpoint_exact_arc_tests PRIVATE PathTempo::PathTempo)
 
+    add_executable(path_tempo_geometry_text_loader_tests
+        test/geometry_text_loader_test.cpp
+        examples/geometry_text_loader.cpp)
+    target_compile_features(path_tempo_geometry_text_loader_tests PRIVATE cxx_std_23)
+
     if (MSVC)
         target_compile_options(path_tempo_tests PRIVATE /W4)
         target_compile_options(path_tempo_continuous_path_options_tests PRIVATE /W4)
         target_compile_options(path_tempo_endpoint_exact_arc_tests PRIVATE /W4)
+        target_compile_options(path_tempo_geometry_text_loader_tests PRIVATE /W4)
     else()
         target_compile_options(path_tempo_tests PRIVATE -Wall -Wextra)
         target_compile_options(path_tempo_continuous_path_options_tests PRIVATE -Wall -Wextra)
         target_compile_options(path_tempo_endpoint_exact_arc_tests PRIVATE -Wall -Wextra)
+        target_compile_options(path_tempo_geometry_text_loader_tests PRIVATE -Wall -Wextra)
     endif()
 
     add_test(NAME path_tempo_tests COMMAND path_tempo_tests)
     add_test(NAME path_tempo_continuous_path_options_tests COMMAND path_tempo_continuous_path_options_tests)
     add_test(NAME path_tempo_endpoint_exact_arc_tests COMMAND path_tempo_endpoint_exact_arc_tests)
+    add_test(NAME path_tempo_geometry_text_loader_tests COMMAND path_tempo_geometry_text_loader_tests)
 endif()
 
-add_executable(path_tempo_continuous_path_example EXCLUDE_FROM_ALL
+add_executable(path_tempo_continuous_path_example
     examples/continuous_path.cpp
     examples/continuous_path_options.cpp
     examples/endpoint_exact_arc.cpp

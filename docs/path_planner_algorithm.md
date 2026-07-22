@@ -65,7 +65,7 @@ The following values are part of the specified behavior:
 | Name | Value | Purpose |
 |---|---:|---|
 | Numerical zero | `1e-15` | Negligible scalar values |
-| Geometry component zero | `1e-15` | Negligible derivative components |
+| Geometry component zero | `1e-15` | Negligible tangent components in scalar-limit quotients |
 | Unit-tangent squared tolerance | `1e-9` | Validates arc-length parameterization |
 | Tangent continuity tolerance | `1e-9` | Validates adjacent pieces |
 | Curvature continuity tolerance | `1e-8` | Validates adjacent pieces |
@@ -113,13 +113,17 @@ A = min(pathAccelerationLimit, initialScalarAccelerationLimit)
 J = min(pathJerkLimit, initialScalarJerkLimit)
 ```
 
-At every differential station and for every coordinate, tighten the scalar limits as follows whenever the divisor is larger than the geometry-component-zero tolerance:
+At every differential station and for every coordinate, tighten the tangent-derived scalar limits whenever `abs(q1)` is larger than the geometry-component-zero tolerance:
 
 ```text
 V = min(V, coordinateVelocityLimit / abs(q1))
 A = min(A, coordinateAccelerationLimit / abs(q1))
 J = min(J, coordinateJerkLimit / abs(q1))
+```
 
+Every nonzero curvature or third-derivative component is constraining, regardless of magnitude:
+
+```text
 V = min(V, sqrt(coordinateAccelerationLimit / abs(q2)))
 V = min(V, cbrt(coordinateJerkLimit / abs(q3)))
 ```
@@ -147,7 +151,7 @@ cap[i] = min(V[i-1], V[i])        for 0 < i < n
 
 Given a materialized transition for one piece, evaluate every supplied differential constraint station. Find every constant-jerk phase whose position interval contains the station, allowing an absolute distance tolerance of `1e-12` and a relative tolerance of `1e-10 * pieceLength`. Evaluating every containing phase intentionally evaluates both sides when a station coincides with a phase boundary.
 
-If every station has zero curvature and zero third derivative within the geometry-component tolerance, the scalar caps already imply every coordinate and aggregate constraint. Skip the coupled station-time evaluation for that piece.
+If every station has exactly zero curvature and exactly zero third derivative, the scalar caps already imply every coordinate and aggregate constraint. Skip the coupled station-time evaluation for that piece. Any nonzero curvature or third derivative, including a value below the tangent-component tolerance, requires the coupled station-time evaluation.
 
 Invert the monotone scalar position polynomial inside the phase with safeguarded Newton iteration. Start from linear position interpolation, retain a valid time bracket, and accept a Newton step only when it remains strictly inside that bracket; otherwise bisect. Stop when position agrees within eight double-precision epsilons scaled by `max(1, abs(stationDistance))`. Try at most `12` Newton steps, followed when necessary by up to `40` pure bisections. At the resulting time, obtain scalar velocity `v`, acceleration `a`, and jerk `j`. Clamp a tiny negative scalar velocity to zero before evaluating the coordinate constraints.
 

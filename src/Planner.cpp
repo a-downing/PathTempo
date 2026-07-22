@@ -692,7 +692,7 @@ namespace path_tempo {
         auto acceleration = from.acceleration;
 
         auto invalidPhase = false;
-        const auto appendPhase = [&](const double duration, const double jerk, const bool initialStateCorrection = false) -> bool {
+        const auto appendPhase = [&](const double duration, const double jerk) -> bool {
             if (!std::isfinite(duration) || !std::isfinite(jerk) || duration < -MINIMUM_PHASE_DURATION) {
                 invalidPhase = true;
 
@@ -710,7 +710,6 @@ namespace path_tempo {
                 .c1 = velocity,
                 .c2 = acceleration / 2.0,
                 .c3 = jerk / 6.0,
-                .initialStateCorrection = initialStateCorrection,
             })) {
                 return false;
             }
@@ -723,7 +722,7 @@ namespace path_tempo {
         };
 
         for (std::size_t phase = 0; phase < profile.brake.t.size(); ++phase) {
-            if (!appendPhase(profile.brake.t[phase], profile.brake.j[phase], true)) {
+            if (!appendPhase(profile.brake.t[phase], profile.brake.j[phase])) {
                 return std::unexpected(PlanningError {
                     .code = invalidPhase ? PlanningErrorCode::SolverFailure : PlanningErrorCode::CapacityExceeded,
                     .message = invalidPhase ? "Ruckig produced an invalid local phase" : "local time law exceeded its fixed phase capacity",
@@ -1362,8 +1361,6 @@ namespace path_tempo {
 
                 refinedPathDistance += pieces[pieceIndex].length;
             }
-
-            result.diagnostics.velocitySeedDuration = result.diagnostics.trajectoryDuration;
 
             if (materializationCorrection) {
                 const auto requested = materializationCorrection(result);

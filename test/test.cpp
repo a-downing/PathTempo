@@ -453,7 +453,6 @@ namespace {
         require(planned->pieceBoundaries[1].velocity > 0.0, "continuous planning should retain motion at an internal boundary");
         require(planned->pieceBoundaries[1].velocity <= 1.5 + BOUNDARY_LIMIT_TOLERANCE, "an internal boundary should honor both piece maximum velocities");
         require(planned->diagnostics.trajectoryDuration > 0.0, "multi-piece planning should report its materialized duration");
-        require(planned->diagnostics.velocitySeedDuration == planned->diagnostics.trajectoryDuration, "the legacy duration diagnostic should remain a compatibility alias");
 
         auto previousDistance = 0.0;
         auto previousVelocity = 0.0;
@@ -967,7 +966,7 @@ namespace {
     }
 }
 int main() {
-    require(path_tempo::version() == "0.1.0", "version should match the project version");
+    require(path_tempo::version() == PATH_TEMPO_EXPECTED_VERSION, "version should match the project version");
     testLineSampling();
     testLineSamplingErrors();
     testArcSampling();

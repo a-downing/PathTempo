@@ -62,30 +62,6 @@ namespace path_tempo::example {
                 + adaptiveSimpson(function, middle, to, tolerance * 0.5, middleValue, rightMiddleValue,
                                   toValue, right, depth + 1);
         }
-
-        double vectorMagnitude(const Vector<3> &value) {
-            return std::sqrt(std::inner_product(value.begin(), value.end(), value.begin(), 0.0));
-        }
-
-        Vector<3> vectorScale(const Vector<3> &value, const double amount) {
-            Vector<3> result {};
-
-            for (std::size_t component = 0; component < result.size(); ++component) {
-                result[component] = value[component] * amount;
-            }
-
-            return result;
-        }
-
-        Vector<3> vectorAdd(const Vector<3> &left, const Vector<3> &right) {
-            Vector<3> result {};
-
-            for (std::size_t component = 0; component < result.size(); ++component) {
-                result[component] = left[component] + right[component];
-            }
-
-            return result;
-        }
     }
 
     std::array<Vector<3>, 4> EndpointExactArc::derivatives(const double requestedParameter) const {
@@ -125,7 +101,7 @@ namespace path_tempo::example {
     }
 
     double EndpointExactArc::speed(const double parameter) const {
-        return vectorMagnitude(derivatives(parameter)[1]);
+        return magnitude(derivatives(parameter)[1]);
     }
 
     double EndpointExactArc::integratedLength(const double from, const double to) const {
@@ -252,21 +228,21 @@ namespace path_tempo::example {
         const auto &first = values[1];
         const auto &second = values[2];
         const auto &third = values[3];
-        const auto speedValue = vectorMagnitude(first);
-        const auto firstSecond = std::inner_product(first.begin(), first.end(), second.begin(), 0.0);
-        const auto secondSquared = std::inner_product(second.begin(), second.end(), second.begin(), 0.0);
-        const auto firstThird = std::inner_product(first.begin(), first.end(), third.begin(), 0.0);
+        const auto speedValue = magnitude(first);
+        const auto firstSecond = dot(first, second);
+        const auto secondSquared = dot(second, second);
+        const auto firstThird = dot(first, third);
         const auto speed2 = speedValue * speedValue;
         const auto speed3 = speed2 * speedValue;
         const auto speed4 = speed2 * speed2;
         const auto speed5 = speed4 * speedValue;
         const auto speed7 = speed5 * speed2;
-        const auto tangent = vectorScale(first, 1.0 / speedValue);
-        const auto curvature = vectorAdd(vectorScale(second, 1.0 / speed2), vectorScale(first, -firstSecond / speed4));
-        auto thirdDerivative = vectorScale(third, 1.0 / speed3);
-        thirdDerivative = vectorAdd(thirdDerivative, vectorScale(second, -3.0 * firstSecond / speed5));
-        thirdDerivative = vectorAdd(thirdDerivative,
-            vectorScale(first, -(secondSquared + firstThird) / speed5 + 4.0 * firstSecond * firstSecond / speed7));
+        const auto tangent = scale(first, 1.0 / speedValue);
+        const auto curvature = add(scale(second, 1.0 / speed2), scale(first, -firstSecond / speed4));
+        auto thirdDerivative = scale(third, 1.0 / speed3);
+        thirdDerivative = add(thirdDerivative, scale(second, -3.0 * firstSecond / speed5));
+        thirdDerivative = add(thirdDerivative,
+            scale(first, -(secondSquared + firstThird) / speed5 + 4.0 * firstSecond * firstSecond / speed7));
 
         return {tangent, curvature, thirdDerivative};
     }

@@ -66,8 +66,6 @@ namespace path_tempo {
     };
 
     struct PathPlanningDiagnostics {
-        // Legacy compatibility name. New code should use trajectoryDuration.
-        double velocitySeedDuration = 0.0;
         std::size_t correctionPasses = 0;
         std::size_t correctedPieces = 0;
         double maximumAppliedTimeScale = 1.0;
