@@ -110,6 +110,10 @@ namespace path_tempo {
         struct Implementation;
         std::unique_ptr<Implementation> m_implementation;
 
+        friend class PathPlanner;
+        std::expected<ScalarTransition, PlanningError> solveImpl(const ScalarTransitionRequest &request, bool detailedErrors);
+        std::expected<ScalarTransition, PlanningError> solveSpeculative(const ScalarTransitionRequest &request);
+
     public:
         ScalarTransitionPlanner();
         ~ScalarTransitionPlanner();

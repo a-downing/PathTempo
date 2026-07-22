@@ -629,6 +629,14 @@ namespace path_tempo {
     ScalarTransitionPlanner &ScalarTransitionPlanner::operator=(ScalarTransitionPlanner &&) noexcept = default;
 
     std::expected<ScalarTransition, PlanningError> ScalarTransitionPlanner::solve(const ScalarTransitionRequest &request) {
+        return solveImpl(request, true);
+    }
+
+    std::expected<ScalarTransition, PlanningError> ScalarTransitionPlanner::solveSpeculative(const ScalarTransitionRequest &request) {
+        return solveImpl(request, false);
+    }
+
+    std::expected<ScalarTransition, PlanningError> ScalarTransitionPlanner::solveImpl(const ScalarTransitionRequest &request, const bool detailedErrors) {
         const auto &from = request.beginning;
         const auto &to = request.ending;
 
@@ -685,7 +693,7 @@ namespace path_tempo {
         if (m_implementation->generator.calculate(input, trajectory) != ruckig::Result::Working) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::SolverFailure,
-                .message = std::format("Ruckig failed local position timing: length={} state (v={}, a={}) -> (v={}, a={}) limits v={} a={} j={}", request.length, from.velocity, from.acceleration, to.velocity, to.acceleration, request.maximumVelocity, request.maximumAcceleration, request.maximumJerk),
+                .message = detailedErrors ? std::format("Ruckig failed local position timing: length={} state (v={}, a={}) -> (v={}, a={}) limits v={} a={} j={}", request.length, from.velocity, from.acceleration, to.velocity, to.acceleration, request.maximumVelocity, request.maximumAcceleration, request.maximumJerk) : std::string {},
             });
         }
 
@@ -769,7 +777,7 @@ namespace path_tempo {
             if (!std::isfinite(time) || !std::isfinite(phaseDistance) || !std::isfinite(phaseVelocity) || !std::isfinite(phaseAcceleration) || phaseDistance < -distanceTolerance || phaseDistance > request.length + distanceTolerance || phaseVelocity < -velocityTolerance || time <= previousTime || phaseDistance < previousDistance - distanceTolerance) {
                 return std::unexpected(PlanningError {
                     .code = PlanningErrorCode::NonMonotoneResult,
-                    .message = std::format("Ruckig produced a non-monotone local path law at boundary {} of {}: time={} distance={} velocity={} acceleration={} previous time={} previous distance={} length={} distance tolerance={} velocity tolerance={}", phase + 1, result.size() + 1, time, phaseDistance, phaseVelocity, phaseAcceleration, previousTime, previousDistance, request.length, distanceTolerance, velocityTolerance),
+                    .message = detailedErrors ? std::format("Ruckig produced a non-monotone local path law at boundary {} of {}: time={} distance={} velocity={} acceleration={} previous time={} previous distance={} length={} distance tolerance={} velocity tolerance={}", phase + 1, result.size() + 1, time, phaseDistance, phaseVelocity, phaseAcceleration, previousTime, previousDistance, request.length, distanceTolerance, velocityTolerance) : std::string {},
                 });
             }
 
@@ -786,7 +794,7 @@ namespace path_tempo {
             if (minimumVelocity < -velocityTolerance) {
                 return std::unexpected(PlanningError {
                     .code = PlanningErrorCode::DirectionReversal,
-                    .message = std::format("Ruckig local position timing reverses path direction in phase {}: minimum_velocity={} tolerance={} duration={} length={} state (v={}, a={}) -> (v={}, a={}) limits v={} a={} j={}", phase, minimumVelocity, velocityTolerance, segment.duration, request.length, from.velocity, from.acceleration, to.velocity, to.acceleration, request.maximumVelocity, request.maximumAcceleration, request.maximumJerk),
+                    .message = detailedErrors ? std::format("Ruckig local position timing reverses path direction in phase {}: minimum_velocity={} tolerance={} duration={} length={} state (v={}, a={}) -> (v={}, a={}) limits v={} a={} j={}", phase, minimumVelocity, velocityTolerance, segment.duration, request.length, from.velocity, from.acceleration, to.velocity, to.acceleration, request.maximumVelocity, request.maximumAcceleration, request.maximumJerk) : std::string {},
                 });
             }
 
@@ -797,7 +805,7 @@ namespace path_tempo {
         if (result.empty() || std::abs(previousDistance - request.length) > distanceTolerance || std::abs(result.back().velocity(result.back().duration) - to.velocity) > velocityTolerance || std::abs(result.back().acceleration(result.back().duration) - to.acceleration) > accelerationTolerance) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::SolverFailure,
-                .message = std::format("Ruckig local position timing missed its requested endpoint: distance={} requested={} velocity={} requested={} acceleration={} requested={}", previousDistance, request.length, result.empty() ? from.velocity : result.back().velocity(result.back().duration), to.velocity, result.empty() ? from.acceleration : result.back().acceleration(result.back().duration), to.acceleration),
+                .message = detailedErrors ? std::format("Ruckig local position timing missed its requested endpoint: distance={} requested={} velocity={} requested={} acceleration={} requested={}", previousDistance, request.length, result.empty() ? from.velocity : result.back().velocity(result.back().duration), to.velocity, result.empty() ? from.acceleration : result.back().acceleration(result.back().duration), to.acceleration) : std::string {},
             });
         }
 
@@ -849,15 +857,25 @@ namespace path_tempo {
                 }
             };
 
+            auto firstSegment = std::size_t {0};
+
             for (std::size_t stationIndex = 0; stationIndex < piece.stations.size(); ++stationIndex) {
                 const auto &station = piece.stations[stationIndex];
                 auto visited = false;
 
-                for (const auto &segment : transition) {
+                while (firstSegment < transition.size() && station.distance > transition[firstSegment].position(transition[firstSegment].duration) + tolerance) {
+                    ++firstSegment;
+                }
+
+                for (auto segmentIndex = firstSegment; segmentIndex < transition.size(); ++segmentIndex) {
+                    const auto &segment = transition[segmentIndex];
                     const auto from = segment.position(0.0);
                     const auto to = segment.position(segment.duration);
 
-                    if (station.distance < from - tolerance || station.distance > to + tolerance) {
+                    if (station.distance < from - tolerance) {
+                        break;
+                    }
+                    if (station.distance > to + tolerance) {
                         continue;
                     }
 
@@ -1071,7 +1089,7 @@ namespace path_tempo {
 
                 const auto solvePiece = [&](const std::size_t pieceIndex) -> bool {
                     const auto &piece = localPieces[pieceIndex];
-                    const auto transition = m_implementation->transitionPlanner.solve({
+                    const auto transition = m_implementation->transitionPlanner.solveSpeculative({
                         .piece = piece.id,
                         .length = piece.length,
                         .beginning = boundaryStates[pieceIndex],

@@ -1,3 +1,4 @@
+#include <algorithm>
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
@@ -436,6 +437,24 @@ namespace {
 
         require(!transition.has_value(), "zero-length transition should be rejected");
         require(transition.error().code == path_tempo::PlanningErrorCode::InvalidInput, "invalid transition should return a typed input error");
+    }
+
+    void testUnrecoverableTransitionHasDetailedError() {
+        path_tempo::ScalarTransitionPlanner planner;
+        const auto transition = planner.solve({
+            .piece = 30,
+            .length = 1e-3,
+            .beginning = {.velocity = 1.0, .acceleration = 1.0},
+            .ending = {.velocity = 1.0, .acceleration = -1.0},
+            .maximumVelocity = 1.0,
+            .maximumAcceleration = 1.0,
+            .maximumJerk = 1.0,
+        });
+
+        require(!transition.has_value(), "an infeasible public transition should fail");
+        require(!transition.error().message.empty(), "an unrecoverable public transition failure should retain a detailed message");
+        require(transition.error().message.contains("Ruckig"), "an unrecoverable public transition failure should identify the underlying solver");
+        require(transition.error().message.contains("length="), "an unrecoverable public transition failure should include request context");
     }
 
     void testTransitionLimitValidation() {
@@ -912,6 +931,79 @@ namespace {
         }
     }
 
+    void testCoupledStationsAtTransitionBoundaries() {
+        auto curve = sampledQuarterCircle(52, 4.0, 4);
+        const std::array referencePieces {curve.view()};
+        const auto unbounded = std::numeric_limits<double>::infinity();
+        const path_tempo::Limits<3> limits {
+            .pathAcceleration = 0.8,
+            .pathJerk = 1.2,
+            .coordinateVelocity = {unbounded, unbounded, unbounded},
+            .coordinateAcceleration = {unbounded, unbounded, unbounded},
+            .coordinateJerk = {unbounded, unbounded, unbounded},
+        };
+        const path_tempo::PathPlanningSettings settings {
+            .maximumCorrectionPasses = 12,
+            .boundaryAccelerationMode = path_tempo::BoundaryAccelerationMode::Zero,
+        };
+        path_tempo::PathPlanner referencePlanner;
+        const auto reference = referencePlanner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = referencePieces,
+            .beginning = {},
+            .ending = {},
+            .limits = limits,
+            .settings = settings,
+        });
+
+        require(reference.has_value(), "the phase-boundary station reference path should solve");
+
+        for (const auto &segment : reference->timeLaw.segments) {
+            const auto distance = segment.position(segment.duration);
+
+            if (distance <= 0.0 || distance >= curve.length) {
+                continue;
+            }
+
+            const path_tempo::DifferentialStation<3> station {
+                .distance = distance,
+                .tangent = {-std::sin(distance), std::cos(distance), 0.0},
+                .curvature = {-std::cos(distance), -std::sin(distance), 0.0},
+                .thirdDerivative = {std::sin(distance), -std::cos(distance), 0.0},
+            };
+            curve.stations.push_back(station);
+        }
+
+        std::ranges::sort(curve.stations, {}, &path_tempo::DifferentialStation<3>::distance);
+        const std::array boundaryPieces {curve.view()};
+        path_tempo::PathPlanner boundaryPlanner;
+        const auto boundary = boundaryPlanner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = boundaryPieces,
+            .beginning = {},
+            .ending = {},
+            .limits = limits,
+            .settings = settings,
+        });
+
+        require(boundary.has_value(), "coupled stations at scalar phase boundaries should remain covered");
+
+        auto duplicated = curve;
+        duplicated.stations.insert(duplicated.stations.end(), curve.stations.begin(), curve.stations.end());
+        std::ranges::sort(duplicated.stations, {}, &path_tempo::DifferentialStation<3>::distance);
+        const std::array duplicatedPieces {duplicated.view()};
+        path_tempo::PathPlanner duplicatedPlanner;
+        const auto enriched = duplicatedPlanner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = duplicatedPieces,
+            .beginning = {},
+            .ending = {},
+            .limits = limits,
+            .settings = settings,
+        });
+
+        require(enriched.has_value(), "duplicate coupled stations at scalar phase boundaries should remain covered");
+        require(enriched->diagnostics.correctionPasses == boundary->diagnostics.correctionPasses, "duplicate phase-boundary stations should preserve correction convergence");
+        require(std::abs(enriched->diagnostics.trajectoryDuration - boundary->diagnostics.trajectoryDuration) <= SOLVER_ENDPOINT_TOLERANCE, "duplicate phase-boundary stations should preserve trajectory duration");
+    }
+
     void testAcceptedTransitionEndpointChecksCoupledStation() {
         constexpr double length = 0.019140457806488653;
         constexpr double maximumVelocity = 2.2670593417302345;
@@ -1232,6 +1324,7 @@ int main() {
     testUnboundedAccelerationCruiseValidation();
     testSubPicosecondCruisePhase();
     testInvalidTransition();
+    testUnrecoverableTransitionHasDetailedError();
     testTransitionLimitValidation();
     testShortTransitionVelocityTolerance();
     testVelocityReachability();
@@ -1241,6 +1334,7 @@ int main() {
     testMultiPiecePathRejectsTangentDiscontinuity();
     testCurvatureContinuityUsesGeometricScale();
     testCurvedPathPlanning();
+    testCoupledStationsAtTransitionBoundaries();
     testAcceptedTransitionEndpointChecksCoupledStation();
     testCurvedBoundaryRejectsGeometricJerkViolation();
     testTinyNonzeroGeometryConstrainsBoundaryVelocity();
