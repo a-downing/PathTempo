@@ -30,8 +30,9 @@ namespace {
     constexpr double BOUNDARY_LIMIT_TOLERANCE = 1e-10;
     // Treat jerk below this scale as zero before dividing to locate an extremum.
     constexpr double JERK_ZERO_TOLERANCE = 1e-15;
-    // Station association compares independently evaluated path distances.
-    constexpr double STATION_MATCH_TOLERANCE = 1e-10;
+    // Station association uses the scalar transition's accepted endpoint error.
+    constexpr double STATION_MATCH_ABSOLUTE_TOLERANCE = 1e-12;
+    constexpr double STATION_MATCH_RELATIVE_TOLERANCE = 1e-9;
 
     void require(const bool condition, const std::string_view message) {
         if (!condition) {
@@ -675,7 +676,8 @@ namespace {
         require(planned->diagnostics.correctedPieces == 1, "coupled curved constraints should trigger a local correction for this path");
 
         for (const auto &station : curve.stations) {
-            const auto tolerance = STATION_MATCH_TOLERANCE;
+            const auto tolerance = std::max(STATION_MATCH_ABSOLUTE_TOLERANCE, curve.length * STATION_MATCH_RELATIVE_TOLERANCE);
+            auto visited = false;
 
             for (const auto &segment : planned->timeLaw.segments) {
                 const auto localFrom = segment.position(0.0);
@@ -685,6 +687,7 @@ namespace {
                     continue;
                 }
 
+                visited = true;
                 auto low = 0.0;
                 auto high = segment.duration;
 
@@ -718,7 +721,65 @@ namespace {
                 require(std::sqrt(coupledAccelerationSquared) <= limits.pathAcceleration * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled path acceleration");
                 require(std::sqrt(coupledJerkSquared) <= limits.pathJerk * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "curved timing should obey sampled coupled path jerk");
             }
+
+            require(visited, "every curved differential station should match at least one scalar phase");
         }
+    }
+
+    void testAcceptedTransitionEndpointChecksCoupledStation() {
+        constexpr double length = 0.019140457806488653;
+        constexpr double maximumVelocity = 2.2670593417302345;
+        constexpr double maximumAcceleration = 56048.752530983584;
+        constexpr double maximumJerk = 13212749508.561106;
+        constexpr double thirdDerivative = 1.0e9;
+        const std::array stations {
+            path_tempo::DifferentialStation<1> {
+                .distance = 0.0,
+                .tangent = {1.0},
+                .thirdDerivative = {thirdDerivative},
+            },
+            path_tempo::DifferentialStation<1> {
+                .distance = length,
+                .tangent = {1.0},
+                .thirdDerivative = {thirdDerivative},
+            },
+        };
+        const std::array pieces {
+            path_tempo::PathPiece<1> {
+                .id = 52,
+                .length = length,
+                .maxVelocity = maximumVelocity,
+                .initialLimits = {
+                    .velocity = maximumVelocity,
+                    .acceleration = maximumAcceleration,
+                    .jerk = maximumJerk,
+                },
+                .stations = stations,
+            },
+        };
+        path_tempo::PathPlanner planner;
+        const auto planned = planner.solve(path_tempo::PathPlanningRequest<1> {
+            .pieces = pieces,
+            .beginning = {.velocity = 0.75667090528164205},
+            .ending = {.velocity = 0.5804097813273188},
+            .limits = {
+                .pathAcceleration = maximumAcceleration,
+                .pathJerk = maximumJerk,
+                .coordinateVelocity = {maximumVelocity},
+                .coordinateAcceleration = {maximumAcceleration},
+                .coordinateJerk = {maximumJerk},
+            },
+            .settings = {.boundaryAccelerationMode = path_tempo::BoundaryAccelerationMode::Zero},
+        });
+
+        require(planned.has_value(), "an endpoint within the accepted transition tolerance should remain covered by coupled checking");
+        require(planned->diagnostics.correctedPieces == 1, "a coupled violation at a slightly undershot endpoint should trigger correction");
+
+        const auto &last = planned->timeLaw.segments.back();
+        const auto velocity = last.velocity(last.duration);
+        const auto coupledJerk = last.jerk() + thirdDerivative * velocity * velocity * velocity;
+
+        require(std::abs(coupledJerk) <= maximumJerk * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "the corrected endpoint should satisfy its coupled jerk limit");
     }
 
     void testCurvedBoundaryRejectsGeometricJerkViolation() {
@@ -988,6 +1049,7 @@ int main() {
     testMultiPiecePathUsesNonzeroBoundaryAcceleration();
     testMultiPiecePathRejectsTangentDiscontinuity();
     testCurvedPathPlanning();
+    testAcceptedTransitionEndpointChecksCoupledStation();
     testCurvedBoundaryRejectsGeometricJerkViolation();
     testTinyNonzeroGeometryConstrainsBoundaryVelocity();
     testMultiPieceCurvedPlanning();

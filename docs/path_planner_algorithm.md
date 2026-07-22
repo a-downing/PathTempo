@@ -71,8 +71,8 @@ The following values are part of the specified behavior:
 | Curvature continuity tolerance | `1e-8` | Validates adjacent pieces |
 | Station-distance absolute tolerance | `1e-12` | Validates endpoint coverage |
 | Station-distance relative tolerance | `1e-10` | Validates endpoint coverage |
-| Constraint-station lookup absolute tolerance | `1e-12` | Matches samples to scalar phases |
-| Constraint-station lookup relative tolerance | `1e-10` | Matches samples to scalar phases |
+| Transition-distance absolute tolerance | `1e-12` | Validates scalar endpoints and matches samples to scalar phases |
+| Transition-distance relative tolerance | `1e-9` | Validates scalar endpoints and matches samples to scalar phases |
 | Constraint relative tolerance | `1e-10` | Limit comparison allowance |
 | Fixed-end reachability tolerance | `1e-10` | Endpoint feasibility allowance |
 | Reachability convergence tolerance | `1e-11` | Forward/backward envelope convergence |
@@ -149,7 +149,7 @@ cap[i] = min(V[i-1], V[i])        for 0 < i < n
 
 ## Complete coupled-constraint check
 
-Given a materialized transition for one piece, evaluate every supplied differential constraint station. Find every constant-jerk phase whose position interval contains the station, allowing an absolute distance tolerance of `1e-12` and a relative tolerance of `1e-10 * pieceLength`. Evaluating every containing phase intentionally evaluates both sides when a station coincides with a phase boundary.
+Given a materialized transition for one piece, evaluate every supplied differential constraint station. Find every constant-jerk phase whose position interval contains the station, using the same `max(1e-12, 1e-9 * pieceLength)` tolerance that validates the scalar transition endpoint. Evaluating every containing phase intentionally evaluates both sides when a station coincides with a phase boundary. Fail with a solver error if any station matches no phase.
 
 If every station has exactly zero curvature and exactly zero third derivative, the scalar caps already imply every coordinate and aggregate constraint. Skip the coupled station-time evaluation for that piece. Any nonzero curvature or third derivative, including a value below the tangent-component tolerance, requires the coupled station-time evaluation.
 

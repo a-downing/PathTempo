@@ -5,6 +5,7 @@
 #include <cmath>
 #include <format>
 #include <numeric>
+#include <optional>
 #include <utility>
 
 #include <ruckig/ruckig.hpp>
@@ -42,10 +43,6 @@ namespace path_tempo {
         constexpr double TRANSITION_ABSOLUTE_TOLERANCE = 1e-12;
         constexpr double TRANSITION_DISTANCE_RELATIVE_TOLERANCE = 1e-9;
         constexpr double TRANSITION_VELOCITY_RELATIVE_TOLERANCE = 1e-10;
-        // Station lookup combines independently sampled geometry and time-law
-        // evaluation, requiring a small absolute and length-relative allowance.
-        constexpr double STATION_LOOKUP_ABSOLUTE_TOLERANCE = 1e-12;
-        constexpr double STATION_LOOKUP_RELATIVE_TOLERANCE = 1e-10;
         // Reachability passes stop once further boundary-speed changes are below
         // meaningful solver resolution; fixed endpoints get a slightly looser test.
         constexpr double REACHABILITY_CONVERGENCE_TOLERANCE = 1e-11;
@@ -89,6 +86,10 @@ namespace path_tempo {
         constexpr double BOUNDARY_REFINEMENT_CONVERGENCE_TOLERANCE = 1e-2;
         constexpr std::size_t BOUNDARY_STATE_REFINEMENT_MAXIMUM_SWEEPS = 12;
         constexpr double BOUNDARY_STATE_REFINEMENT_CONVERGENCE_TOLERANCE = 1e-6;
+
+        double transitionDistanceTolerance(const double length) {
+            return std::max(TRANSITION_ABSOLUTE_TOLERANCE, length * TRANSITION_DISTANCE_RELATIVE_TOLERANCE);
+        }
 
         double stationTime(const CubicTimeSegment &segment, const double requestedDistance) {
             const auto from = segment.position(0.0);
@@ -746,7 +747,7 @@ namespace path_tempo {
             });
         }
 
-        const auto distanceTolerance = std::max(TRANSITION_ABSOLUTE_TOLERANCE, request.length * TRANSITION_DISTANCE_RELATIVE_TOLERANCE);
+        const auto distanceTolerance = transitionDistanceTolerance(request.length);
         const auto velocityTolerance = std::max(TRANSITION_ABSOLUTE_TOLERANCE, request.maximumVelocity * TRANSITION_VELOCITY_RELATIVE_TOLERANCE);
         const auto accelerationTolerance = std::max(TRANSITION_ABSOLUTE_TOLERANCE, request.maximumAcceleration * TRANSITION_VELOCITY_RELATIVE_TOLERANCE);
         auto previousTime = 0.0;
@@ -823,20 +824,22 @@ namespace path_tempo {
             return "sampled coupled-path constraint correction";
         };
 
-        const auto coupledTimeScale = [&](const LocalPiece &piece, const ScalarTransition &transition) {
+        const auto coupledTimeScale = [&](const LocalPiece &piece, const ScalarTransition &transition) -> std::expected<double, PlanningError> {
             if (!piece.requiresCoupledCheck) {
                 return 1.0;
             }
 
             auto required = 1.0;
+            const auto tolerance = transitionDistanceTolerance(piece.length);
             const auto consider = [&](const double measured, const double limit, const double exponent) {
                 if (std::isfinite(limit) && measured > limit) {
                     required = std::max(required, std::pow(measured / limit, exponent));
                 }
             };
 
-            for (const auto &station : piece.stations) {
-                const auto tolerance = std::max(STATION_LOOKUP_ABSOLUTE_TOLERANCE, piece.length * STATION_LOOKUP_RELATIVE_TOLERANCE);
+            for (std::size_t stationIndex = 0; stationIndex < piece.stations.size(); ++stationIndex) {
+                const auto &station = piece.stations[stationIndex];
+                auto visited = false;
 
                 for (const auto &segment : transition) {
                     const auto from = segment.position(0.0);
@@ -846,6 +849,7 @@ namespace path_tempo {
                         continue;
                     }
 
+                    visited = true;
                     const auto time = stationTime(segment, station.distance);
                     const auto velocity = std::max(0.0, segment.velocity(time));
                     const auto acceleration = segment.acceleration(time);
@@ -867,9 +871,33 @@ namespace path_tempo {
                     consider(std::sqrt(accelerationSquared), limits.pathAcceleration, 0.5);
                     consider(std::sqrt(jerkSquared), limits.pathJerk, 1.0 / 3.0);
                 }
+
+                if (!visited) {
+                    return std::unexpected(PlanningError {
+                        .code = PlanningErrorCode::SolverFailure,
+                        .message = std::format("scalar transition for piece {} does not cover differential station {} at distance {}", piece.id, stationIndex, station.distance),
+                    });
+                }
             }
 
             return required;
+        };
+
+        std::optional<PlanningError> coupledCheckFailure;
+        const auto coupledFeasible = [&](const LocalPiece &piece, const ScalarTransition &transition) {
+            if (coupledCheckFailure) {
+                return false;
+            }
+
+            const auto required = coupledTimeScale(piece, transition);
+
+            if (!required) {
+                coupledCheckFailure = required.error();
+
+                return false;
+            }
+
+            return *required <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE;
         };
 
         for (std::size_t correctionPass = 0; correctionPass < settings.maximumCorrectionPasses; ++correctionPass) {
@@ -939,7 +967,12 @@ namespace path_tempo {
             if (settings.applySampledCorrections) {
                 for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
                     const auto sampledCorrection = coupledTimeScale(localPieces[pieceIndex], baselineTransitions[pieceIndex]);
-                    baselineCorrections[pieceIndex] = sampledCorrection > 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE ? sampledCorrection * CORRECTION_SAFETY_FACTOR : 1.0;
+
+                    if (!sampledCorrection) {
+                        return std::unexpected(sampledCorrection.error());
+                    }
+
+                    baselineCorrections[pieceIndex] = *sampledCorrection > 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE ? *sampledCorrection * CORRECTION_SAFETY_FACTOR : 1.0;
                     maximumBaselineCorrection = std::max(maximumBaselineCorrection, baselineCorrections[pieceIndex]);
                 }
             }
@@ -1048,9 +1081,13 @@ namespace path_tempo {
                 for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
                     if (!solvePiece(pieceIndex)) {
                         failed.push_back(pieceIndex);
-                    } else if (settings.applySampledCorrections && coupledTimeScale(localPieces[pieceIndex], transitions[pieceIndex]) > 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
+                    } else if (settings.applySampledCorrections && !coupledFeasible(localPieces[pieceIndex], transitions[pieceIndex])) {
                         failed.push_back(pieceIndex);
                     }
+                }
+
+                if (coupledCheckFailure) {
+                    return std::unexpected(*coupledCheckFailure);
                 }
 
                 // Repair infeasible proposals through a local homotopy. Each
@@ -1113,9 +1150,13 @@ namespace path_tempo {
 
                         if (!solvePiece(pieceIndex)) {
                             stillFailing.push_back(pieceIndex);
-                        } else if (settings.applySampledCorrections && coupledTimeScale(localPieces[pieceIndex], transitions[pieceIndex]) > 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
+                        } else if (settings.applySampledCorrections && !coupledFeasible(localPieces[pieceIndex], transitions[pieceIndex])) {
                             stillFailing.push_back(pieceIndex);
                         }
+                    }
+
+                    if (coupledCheckFailure) {
+                        return std::unexpected(*coupledCheckFailure);
                     }
 
                     failed = std::move(stillFailing);
@@ -1146,7 +1187,7 @@ namespace path_tempo {
                         auto feasible = solvePiece(leftPiece) && solvePiece(rightPiece);
 
                         if (feasible && settings.applySampledCorrections) {
-                            feasible = coupledTimeScale(localPieces[leftPiece], transitions[leftPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE && coupledTimeScale(localPieces[rightPiece], transitions[rightPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE;
+                            feasible = coupledFeasible(localPieces[leftPiece], transitions[leftPiece]) && coupledFeasible(localPieces[rightPiece], transitions[rightPiece]);
                         }
 
                         if (!feasible) {
@@ -1192,6 +1233,14 @@ namespace path_tempo {
 
                         cycleImprovement = 0.0;
                     }
+
+                    if (coupledCheckFailure) {
+                        return std::unexpected(*coupledCheckFailure);
+                    }
+                }
+
+                if (coupledCheckFailure) {
+                    return std::unexpected(*coupledCheckFailure);
                 }
 
                 const auto refineAcceleration = [&](const std::size_t station) -> double {
@@ -1227,7 +1276,7 @@ namespace path_tempo {
                         auto feasible = solvePiece(leftPiece) && solvePiece(rightPiece);
 
                         if (feasible && settings.applySampledCorrections) {
-                            feasible = coupledTimeScale(localPieces[leftPiece], transitions[leftPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE && coupledTimeScale(localPieces[rightPiece], transitions[rightPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE;
+                            feasible = coupledFeasible(localPieces[leftPiece], transitions[leftPiece]) && coupledFeasible(localPieces[rightPiece], transitions[rightPiece]);
                         }
 
                         if (!feasible) {
@@ -1275,7 +1324,7 @@ namespace path_tempo {
                         auto feasible = solvePiece(leftPiece) && solvePiece(rightPiece);
 
                         if (feasible && settings.applySampledCorrections) {
-                            feasible = coupledTimeScale(localPieces[leftPiece], transitions[leftPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE && coupledTimeScale(localPieces[rightPiece], transitions[rightPiece]) <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE;
+                            feasible = coupledFeasible(localPieces[leftPiece], transitions[leftPiece]) && coupledFeasible(localPieces[rightPiece], transitions[rightPiece]);
                         }
 
                         if (!feasible) {
@@ -1324,6 +1373,14 @@ namespace path_tempo {
 
                         stateCycleImprovement = 0.0;
                     }
+
+                    if (coupledCheckFailure) {
+                        return std::unexpected(*coupledCheckFailure);
+                    }
+                }
+
+                if (coupledCheckFailure) {
+                    return std::unexpected(*coupledCheckFailure);
                 }
 
                 const auto transitionDuration = [](const std::span<const ScalarTransition> candidate) {
