@@ -7,6 +7,7 @@
 #include <memory>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 #include "path_tempo/Types.h"
@@ -44,9 +45,15 @@ namespace path_tempo {
         std::string message;
     };
 
+    enum class BoundaryAccelerationMode {
+        Zero,
+        Optimized,
+    };
+
     struct PathPlanningSettings {
         std::size_t maximumCorrectionPasses = detail::DEFAULT_MAXIMUM_CORRECTION_PASSES;
         bool applySampledCorrections = true;
+        BoundaryAccelerationMode boundaryAccelerationMode = BoundaryAccelerationMode::Optimized;
     };
 
     template<std::size_t DoF>
@@ -59,10 +66,12 @@ namespace path_tempo {
     };
 
     struct PathPlanningDiagnostics {
+        // Legacy compatibility name. New code should use trajectoryDuration.
         double velocitySeedDuration = 0.0;
         std::size_t correctionPasses = 0;
         std::size_t correctedPieces = 0;
         double maximumAppliedTimeScale = 1.0;
+        double trajectoryDuration = 0.0;
     };
 
     struct PlannedPath {
@@ -118,12 +127,15 @@ namespace path_tempo {
         struct Implementation;
         std::unique_ptr<Implementation> m_implementation;
 
+        using PieceIndexMap = std::unordered_map<PathPieceId, std::size_t>;
+
         struct LocalPiece {
             PathPieceId id = 0;
             double length = 0.0;
             double maximumVelocity = 0.0;
             double maximumAcceleration = 0.0;
             double maximumJerk = 0.0;
+            bool requiresCoupledCheck = false;
             struct Station {
                 double distance = 0.0;
                 std::span<const double> tangent;
@@ -141,7 +153,7 @@ namespace path_tempo {
             std::vector<double> coordinateJerk;
         };
 
-        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
+        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, const PieceIndexMap &pieceIndices, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
 
     public:
         PathPlanner();

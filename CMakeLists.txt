@@ -57,21 +57,37 @@ if (BUILD_TESTING)
     add_executable(path_tempo_tests test/test.cpp)
     target_link_libraries(path_tempo_tests PRIVATE PathTempo::PathTempo)
 
+    add_executable(path_tempo_continuous_path_options_tests
+        test/continuous_path_options_test.cpp
+        examples/continuous_path_options.cpp)
+    target_compile_features(path_tempo_continuous_path_options_tests PRIVATE cxx_std_23)
+
+    add_executable(path_tempo_endpoint_exact_arc_tests
+        test/endpoint_exact_arc_test.cpp
+        examples/endpoint_exact_arc.cpp)
+    target_link_libraries(path_tempo_endpoint_exact_arc_tests PRIVATE PathTempo::PathTempo)
+
     if (MSVC)
         target_compile_options(path_tempo_tests PRIVATE /W4)
+        target_compile_options(path_tempo_continuous_path_options_tests PRIVATE /W4)
+        target_compile_options(path_tempo_endpoint_exact_arc_tests PRIVATE /W4)
     else()
         target_compile_options(path_tempo_tests PRIVATE -Wall -Wextra)
+        target_compile_options(path_tempo_continuous_path_options_tests PRIVATE -Wall -Wextra)
+        target_compile_options(path_tempo_endpoint_exact_arc_tests PRIVATE -Wall -Wextra)
     endif()
 
     add_test(NAME path_tempo_tests COMMAND path_tempo_tests)
+    add_test(NAME path_tempo_continuous_path_options_tests COMMAND path_tempo_continuous_path_options_tests)
+    add_test(NAME path_tempo_endpoint_exact_arc_tests COMMAND path_tempo_endpoint_exact_arc_tests)
 endif()
 
 add_executable(path_tempo_continuous_path_example EXCLUDE_FROM_ALL
     examples/continuous_path.cpp
+    examples/continuous_path_options.cpp
+    examples/endpoint_exact_arc.cpp
     examples/geometry_text_loader.cpp)
 target_link_libraries(path_tempo_continuous_path_example PRIVATE PathTempo::PathTempo)
-target_compile_definitions(path_tempo_continuous_path_example PRIVATE
-    PATH_TEMPO_EXAMPLE_DATA_DIR="${CMAKE_CURRENT_SOURCE_DIR}/examples/data")
 
 if (MSVC)
     target_compile_options(path_tempo_continuous_path_example PRIVATE /W4)

@@ -288,7 +288,7 @@ namespace path_tempo {
 
                 const auto weight = homogeneous[0][DoF];
 
-                if (!std::isfinite(weight) || weight <= MINIMUM_CURVE_SPEED) {
+                if (!std::isfinite(weight) || weight <= 0.0) {
                     return std::unexpected(SamplingError::IrregularCurve);
                 }
 
@@ -322,11 +322,19 @@ namespace path_tempo {
             RationalEvaluator<DoF> result;
             auto &spline = result.derivatives[0];
             spline.degree = degree;
-            spline.knots.assign(knots.begin(), knots.end());
+            const auto parameterFrom = knots[degree];
+            const auto parameterScale = knots[controls.size()] - parameterFrom;
+            spline.knots.reserve(knots.size());
+
+            for (const auto knot : knots) {
+                spline.knots.push_back((knot - parameterFrom) / parameterScale);
+            }
+
             spline.controls.resize(controls.size());
+            const auto weightScale = weights.empty() ? 1.0 : *std::ranges::max_element(weights);
 
             for (std::size_t control = 0; control < controls.size(); ++control) {
-                const auto weight = weights.empty() ? 1.0 : weights[control];
+                const auto weight = weights.empty() ? 1.0 : weights[control] / weightScale;
 
                 for (std::size_t component = 0; component < DoF; ++component) {
                     spline.controls[control][component] = controls[control][component] * weight;
@@ -533,6 +541,7 @@ namespace path_tempo {
         }
 
         std::vector<SampledPathPiece<DoF>> result;
+        const auto &normalizedKnots = evaluator->derivatives[0].knots;
 
         for (std::size_t span = spline.degree; span < spline.controls.size(); ++span) {
             if (spline.knots[span + 1] <= spline.knots[span]) {
@@ -543,7 +552,7 @@ namespace path_tempo {
                 return std::unexpected(SamplingError::InvalidPieceIds);
             }
 
-            auto piece = detail::sampleParametricInterval<DoF>(*evaluator, spline.knots[span], spline.knots[span + 1], span, firstId + static_cast<PathPieceId>(result.size()), maxVelocity, samplesPerInterval);
+            auto piece = detail::sampleParametricInterval<DoF>(*evaluator, normalizedKnots[span], normalizedKnots[span + 1], span, firstId + static_cast<PathPieceId>(result.size()), maxVelocity, samplesPerInterval);
 
             if (!piece) {
                 return std::unexpected(piece.error());

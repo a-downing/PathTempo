@@ -136,6 +136,26 @@ namespace {
         require((*sampled)[0].id == 24 && (*sampled)[2].id == 26, "unclamped B-spline pieces should receive consecutive identities");
     }
 
+    void testBSplineKnotScaleInvariance() {
+        const std::array<path_tempo::Vector<2>, 2> controls {{{0.0, 0.0}, {1.0, 0.0}}};
+        const std::array unitKnots {0.0, 0.0, 1.0, 1.0};
+        const std::array scaledKnots {0.0, 0.0, 1e16, 1e16};
+        const auto unit = path_tempo::sampleBSpline(path_tempo::BSpline<2> {
+            .degree = 1,
+            .controls = controls,
+            .knots = unitKnots,
+        }, 27, 2.0, 4);
+        const auto scaled = path_tempo::sampleBSpline(path_tempo::BSpline<2> {
+            .degree = 1,
+            .controls = controls,
+            .knots = scaledKnots,
+        }, 28, 2.0, 4);
+
+        require(unit.has_value() && scaled.has_value(), "uniform knot rescaling should preserve a valid B-spline");
+        require(std::abs(unit->front().length - scaled->front().length) <= ANALYTIC_RESULT_TOLERANCE, "uniform knot rescaling should preserve B-spline length");
+        require(std::abs(unit->front().stations.front().tangent[0] - scaled->front().stations.front().tangent[0]) <= ANALYTIC_RESULT_TOLERANCE, "uniform knot rescaling should preserve B-spline differential geometry");
+    }
+
     void testNurbsSampling() {
         const std::array<path_tempo::Vector<2>, 3> controls {{
             {1.0, 0.0},
@@ -154,6 +174,21 @@ namespace {
         require(sampled.has_value(), "quadratic NURBS sampling should succeed");
         require(sampled->size() == 1 && sampled->front().stations.size() == 17, "a single NURBS knot interval should produce one sampled piece");
         require(std::abs(sampled->front().length - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE, "rational quarter-circle sampling should recover exact arc length");
+    }
+
+    void testNurbsWeightScaleInvariance() {
+        const std::array<path_tempo::Vector<2>, 3> controls {{{1.0, 0.0}, {1.0, 1.0}, {0.0, 1.0}}};
+        const std::array weights {1e-100, std::numbers::sqrt2 / 2.0 * 1e-100, 1e-100};
+        const std::array knots {0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+        const auto sampled = path_tempo::sampleNurbs(path_tempo::Nurbs<2> {
+            .degree = 2,
+            .controls = controls,
+            .weights = weights,
+            .knots = knots,
+        }, 31, 2.0, 16);
+
+        require(sampled.has_value(), "uniformly tiny positive NURBS weights should preserve a valid curve");
+        require(std::abs(sampled->front().length - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE, "uniform NURBS weight scaling should preserve curve length");
     }
 
     void testCubicTimeSegment() {
@@ -260,6 +295,50 @@ namespace {
         require(transition.error().code == path_tempo::PlanningErrorCode::InvalidInput, "invalid transition should return a typed input error");
     }
 
+    void testTransitionLimitValidation() {
+        path_tempo::ScalarTransitionPlanner planner;
+        const auto overLimitCruise = planner.solve({
+            .piece = 22,
+            .length = 3.0,
+            .beginning = {.velocity = 1.5},
+            .ending = {.velocity = 1.5},
+            .maximumVelocity = 1.0,
+            .maximumAcceleration = std::numeric_limits<double>::infinity(),
+            .maximumJerk = 4.0,
+        });
+
+        require(!overLimitCruise.has_value(), "an unbounded-acceleration cruise above its velocity limit should be rejected");
+        require(overLimitCruise.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an over-limit cruise should return an input error");
+
+        const auto infiniteVelocity = planner.solve({
+            .piece = 23,
+            .length = 3.0,
+            .beginning = {},
+            .ending = {},
+            .maximumVelocity = std::numeric_limits<double>::infinity(),
+            .maximumAcceleration = 1.0,
+            .maximumJerk = 4.0,
+        });
+
+        require(!infiniteVelocity.has_value(), "an infinite velocity limit should be rejected before it disables transition validation");
+        require(infiniteVelocity.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an infinite velocity limit should return an input error");
+    }
+
+    void testShortTransitionVelocityTolerance() {
+        path_tempo::ScalarTransitionPlanner planner;
+        const auto transition = planner.solve({
+            .piece = 24,
+            .length = 0.01,
+            .beginning = {.velocity = 2500.0},
+            .ending = {},
+            .maximumVelocity = 10000.0,
+            .maximumAcceleration = 1e10,
+            .maximumJerk = 1e16,
+        });
+
+        require(transition.has_value(), "a short transition should use velocity tolerance for tiny negative phase-boundary velocity roundoff");
+    }
+
     void testVelocityReachability() {
         const auto transitionDistance = path_tempo::velocityTransitionDistance(0.0, 2.0, 1.0, 2.0);
 
@@ -280,6 +359,68 @@ namespace {
             .coordinateAcceleration = {2.0, 2.0, 2.0},
             .coordinateJerk = {5.0, 5.0, 5.0},
         };
+    }
+
+    void testPathInputValidation() {
+        const auto sampled = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {0.0, 0.0, 0.0},
+            .to = {3.0, 0.0, 0.0},
+        }, 30, 2.0);
+
+        require(sampled.has_value(), "path input validation should have a valid sampled line");
+
+        auto nanLimits = *sampled;
+        nanLimits.initialLimits.acceleration = std::numeric_limits<double>::quiet_NaN();
+        const std::array nanPieces {nanLimits.view()};
+        path_tempo::PathPlanner planner;
+        const auto nanResult = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = nanPieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        });
+
+        require(!nanResult.has_value(), "a NaN initial piece limit should be rejected");
+        require(nanResult.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a NaN initial piece limit should return an input error");
+
+        const std::array duplicatePieces {sampled->view(), sampled->view()};
+        const auto duplicateResult = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = duplicatePieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {},
+        });
+
+        require(!duplicateResult.has_value(), "duplicate path piece IDs should be rejected");
+        require(duplicateResult.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a duplicate path piece ID should return an input error");
+
+        auto tolerantStations = *sampled;
+        tolerantStations.stations.front().distance = -5e-13;
+        tolerantStations.stations.back().distance = tolerantStations.length + 5e-11;
+        const std::array tolerantPieces {tolerantStations.view()};
+        const auto tolerantResult = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = tolerantPieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {.boundaryAccelerationMode = path_tempo::BoundaryAccelerationMode::Zero},
+        });
+
+        require(tolerantResult.has_value(), "station endpoints within the documented coverage tolerance should be normalized and accepted");
+
+        const std::array validPieces {sampled->view()};
+        const auto invalidMode = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = validPieces,
+            .beginning = {},
+            .ending = {},
+            .limits = testPathLimits(),
+            .settings = {.boundaryAccelerationMode = static_cast<path_tempo::BoundaryAccelerationMode>(127)},
+        });
+
+        require(!invalidMode.has_value(), "an invalid boundary-acceleration mode should be rejected");
+        require(invalidMode.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an invalid boundary-acceleration mode should return an input error");
     }
 
     void testMultiPiecePathPlanning() {
@@ -311,7 +452,8 @@ namespace {
         require(planned->pieceLimits[0].velocity <= 3.0 && planned->pieceLimits[1].velocity <= 1.5, "effective piece limits should retain input maximum velocities");
         require(planned->pieceBoundaries[1].velocity > 0.0, "continuous planning should retain motion at an internal boundary");
         require(planned->pieceBoundaries[1].velocity <= 1.5 + BOUNDARY_LIMIT_TOLERANCE, "an internal boundary should honor both piece maximum velocities");
-        require(planned->diagnostics.velocitySeedDuration > 0.0, "multi-piece planning should report its materialized duration");
+        require(planned->diagnostics.trajectoryDuration > 0.0, "multi-piece planning should report its materialized duration");
+        require(planned->diagnostics.velocitySeedDuration == planned->diagnostics.trajectoryDuration, "the legacy duration diagnostic should remain a compatibility alias");
 
         auto previousDistance = 0.0;
         auto previousVelocity = 0.0;
@@ -361,6 +503,95 @@ namespace {
 
         require(replanned.has_value(), "a repeated path solve should succeed");
         require(!replanned->timeLaw.segments.empty(), "a repeated path solve should produce a scalar time law");
+    }
+
+    void testMultiPiecePathUsesNonzeroBoundaryAcceleration() {
+        const auto first = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {0.0, 0.0, 0.0},
+            .to = {1.0, 0.0, 0.0},
+        }, 111, 10.0);
+        const auto second = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {1.0, 0.0, 0.0},
+            .to = {2.0, 0.0, 0.0},
+        }, 112, 10.0);
+        const auto third = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {2.0, 0.0, 0.0},
+            .to = {3.0, 0.0, 0.0},
+        }, 113, 10.0);
+        const auto fourth = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {3.0, 0.0, 0.0},
+            .to = {4.0, 0.0, 0.0},
+        }, 114, 10.0);
+
+        require(first.has_value() && second.has_value() && third.has_value() && fourth.has_value(), "nonzero-boundary test lines should sample");
+
+        const std::array pieces {first->view(), second->view(), third->view(), fourth->view()};
+        const path_tempo::Limits<3> limits {
+            .pathAcceleration = 2.0,
+            .pathJerk = 4.0,
+            .coordinateVelocity = {10.0, 10.0, 10.0},
+            .coordinateAcceleration = {2.0, 2.0, 2.0},
+            .coordinateJerk = {4.0, 4.0, 4.0},
+        };
+        path_tempo::PathPlanner planner;
+        const auto planned = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = limits,
+            .settings = {.applySampledCorrections = false},
+        });
+
+        require(planned.has_value(), "a collinear four-piece path should solve with continuous boundary acceleration");
+        require(std::ranges::any_of(planned->pieceBoundaries.begin() + 1, planned->pieceBoundaries.end() - 1,
+            [](const path_tempo::BoundaryState &state) { return std::abs(state.acceleration) > 1e-6; }),
+            "a collinear multi-piece path should retain nonzero acceleration across artificial piece boundaries");
+
+        auto boundaryIndex = std::size_t {1};
+
+        for (std::size_t segmentIndex = 0; segmentIndex + 1 < planned->timeLaw.segments.size(); ++segmentIndex) {
+            const auto &left = planned->timeLaw.segments[segmentIndex];
+            const auto &right = planned->timeLaw.segments[segmentIndex + 1];
+
+            if (left.piece == right.piece) {
+                continue;
+            }
+
+            const auto &boundary = planned->pieceBoundaries[boundaryIndex++];
+            require(std::abs(left.velocity(left.duration) - boundary.velocity) <= SOLVER_ENDPOINT_TOLERANCE,
+                "the preceding piece should reach the proposed nonzero-acceleration boundary velocity");
+            require(std::abs(left.acceleration(left.duration) - boundary.acceleration) <= SOLVER_ENDPOINT_TOLERANCE,
+                "the preceding piece should reach the proposed nonzero boundary acceleration");
+            require(std::abs(right.velocity(0.0) - boundary.velocity) <= SOLVER_ENDPOINT_TOLERANCE,
+                "the following piece should begin at the proposed nonzero-acceleration boundary velocity");
+            require(std::abs(right.acceleration(0.0) - boundary.acceleration) <= SOLVER_ENDPOINT_TOLERANCE,
+                "the following piece should begin at the proposed nonzero boundary acceleration");
+        }
+
+        require(boundaryIndex == pieces.size(), "the nonzero-boundary test should materialize every piece boundary");
+
+        const auto zeroBoundary = planner.solve(path_tempo::PathPlanningRequest<3> {
+            .pieces = pieces,
+            .beginning = {},
+            .ending = {},
+            .limits = limits,
+            .settings = {
+                .applySampledCorrections = false,
+                .boundaryAccelerationMode = path_tempo::BoundaryAccelerationMode::Zero,
+            },
+        });
+
+        require(zeroBoundary.has_value(), "the explicit zero-boundary mode should solve");
+        require(std::ranges::all_of(zeroBoundary->pieceBoundaries.begin() + 1, zeroBoundary->pieceBoundaries.end() - 1,
+            [](const path_tempo::BoundaryState &state) { return std::abs(state.acceleration) <= TIME_LAW_CONTINUITY_TOLERANCE; }),
+            "zero-boundary mode should force every internal acceleration to zero");
+
+        const auto nonzeroBoundaryDuration = std::accumulate(planned->timeLaw.segments.begin(), planned->timeLaw.segments.end(), 0.0,
+            [](const double total, const path_tempo::CubicTimeSegment &segment) { return total + segment.duration; });
+        const auto zeroBoundaryDuration = std::accumulate(zeroBoundary->timeLaw.segments.begin(), zeroBoundary->timeLaw.segments.end(), 0.0,
+            [](const double total, const path_tempo::CubicTimeSegment &segment) { return total + segment.duration; });
+        require(nonzeroBoundaryDuration + TIME_LAW_CONTINUITY_TOLERANCE < zeroBoundaryDuration,
+            "nonzero acceleration across artificial boundaries should improve on the zero-acceleration profile");
     }
 
     void testMultiPiecePathRejectsTangentDiscontinuity() {
@@ -513,6 +744,67 @@ namespace {
         require(planned.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an infeasible curved boundary should be an input error");
     }
 
+    void testTinyNonzeroGeometryConstrainsBoundaryVelocity() {
+        const std::array curvatureStations {
+            path_tempo::DifferentialStation<2> {.distance = 0.0, .tangent = {1.0, 0.0}, .curvature = {0.0, 1e-16}},
+            path_tempo::DifferentialStation<2> {.distance = 1.0, .tangent = {1.0, 0.0}, .curvature = {0.0, 1e-16}},
+        };
+        const path_tempo::PathPiece<2> curvaturePiece {
+            .id = 62,
+            .length = 1.0,
+            .maxVelocity = 1e9,
+            .initialLimits = {},
+            .stations = curvatureStations,
+        };
+        const std::array curvaturePieces {curvaturePiece};
+        path_tempo::PathPlanner planner;
+        const auto curvatureLimited = planner.solve(path_tempo::PathPlanningRequest<2> {
+            .pieces = curvaturePieces,
+            .beginning = {.velocity = 1e9},
+            .ending = {.velocity = 1e9},
+            .limits = {
+                .pathAcceleration = 1e300,
+                .pathJerk = 1e300,
+                .coordinateVelocity = {1e300, 1e300},
+                .coordinateAcceleration = {1e300, 1.0},
+                .coordinateJerk = {1e300, 1e300},
+            },
+            .settings = {},
+        });
+
+        require(!curvatureLimited.has_value(), "tiny nonzero curvature should constrain fixed boundary velocity");
+        require(curvatureLimited.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a boundary above a tiny-curvature velocity cap should be an input error");
+
+        const std::array thirdDerivativeStations {
+            path_tempo::DifferentialStation<2> {.distance = 0.0, .tangent = {1.0, 0.0}, .thirdDerivative = {0.0, 1e-18}},
+            path_tempo::DifferentialStation<2> {.distance = 1.0, .tangent = {1.0, 0.0}, .thirdDerivative = {0.0, 1e-18}},
+        };
+        const path_tempo::PathPiece<2> thirdDerivativePiece {
+            .id = 63,
+            .length = 1.0,
+            .maxVelocity = 1e7,
+            .initialLimits = {},
+            .stations = thirdDerivativeStations,
+        };
+        const std::array thirdDerivativePieces {thirdDerivativePiece};
+        const auto jerkLimited = planner.solve(path_tempo::PathPlanningRequest<2> {
+            .pieces = thirdDerivativePieces,
+            .beginning = {.velocity = 1e7},
+            .ending = {.velocity = 1e7},
+            .limits = {
+                .pathAcceleration = 1e300,
+                .pathJerk = 1e300,
+                .coordinateVelocity = {1e300, 1e300},
+                .coordinateAcceleration = {1e300, 1e300},
+                .coordinateJerk = {1e300, 1.0},
+            },
+            .settings = {},
+        });
+
+        require(!jerkLimited.has_value(), "tiny nonzero third derivative should constrain fixed boundary velocity");
+        require(jerkLimited.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a boundary above a tiny-third-derivative velocity cap should be an input error");
+    }
+
     void testMultiPieceCurvedPlanning() {
         const auto first = sampledUnitCircleInterval(71, 0.0, std::numbers::pi / 4.0, 2.0, 16);
         const auto second = sampledUnitCircleInterval(72, std::numbers::pi / 4.0, std::numbers::pi / 2.0, 2.0, 16);
@@ -533,9 +825,9 @@ namespace {
         });
 
         require(planned.has_value(), "a C2 two-piece curved chain should solve");
-        require(planned->pieceBoundaries[1].velocity > 0.0, "a curved internal boundary should retain continuous motion");
-        require(std::abs(planned->pieceBoundaries[1].acceleration) <= TIME_LAW_CONTINUITY_TOLERANCE,
-            "a curved internal boundary should use zero scalar acceleration");
+        require(planned->pieceBoundaries[1].velocity > 0.5, "a curved velocity-cap boundary should not collapse to a stop");
+        require(std::abs(planned->pieceBoundaries[1].acceleration) <= 1.0 + BOUNDARY_LIMIT_TOLERANCE,
+            "a curved internal boundary should obey the shared scalar acceleration limit");
 
         auto previousDistance = 0.0;
         auto previousVelocity = 0.0;
@@ -598,14 +890,18 @@ namespace {
     }
 
     void testMaterializationCorrectionCallback() {
-        const auto line = path_tempo::sampleLine(path_tempo::Line<3> {
+        const auto firstLine = path_tempo::sampleLine(path_tempo::Line<3> {
             .from = {0.0, 0.0, 0.0},
             .to = {10.0, 0.0, 0.0},
         }, 91, 3.0);
+        const auto secondLine = path_tempo::sampleLine(path_tempo::Line<3> {
+            .from = {10.0, 0.0, 0.0},
+            .to = {20.0, 0.0, 0.0},
+        }, 92, 3.0);
 
-        require(line.has_value(), "materialization-correction test line should sample");
+        require(firstLine.has_value() && secondLine.has_value(), "materialization-correction test lines should sample");
 
-        const std::array pieces {line->view()};
+        const std::array pieces {firstLine->view(), secondLine->view()};
         const path_tempo::PathPlanningRequest<3> request {
             .pieces = pieces,
             .beginning = {},
@@ -624,7 +920,7 @@ namespace {
             require(!candidate.timeLaw.segments.empty(), "materialization callback should receive a complete candidate");
 
             if (callbackCalls == 1) {
-                return std::vector {path_tempo::PieceCorrection {.piece = 91, .requiredTimeScale = 2.0}};
+                return std::vector {path_tempo::PieceCorrection {.piece = 92, .requiredTimeScale = 2.0}};
             }
 
             return std::vector<path_tempo::PieceCorrection> {};
@@ -635,8 +931,10 @@ namespace {
         require(corrected.has_value(), "a valid materialization correction should re-solve");
         require(callbackCalls == 2, "materialization correction should receive the corrected candidate");
         require(corrected->diagnostics.correctedPieces == 1, "materialization correction should retain corrected-piece diagnostics");
-        require(corrected->pieceLimits.size() == 1 && corrected->pieceLimits.front().velocity <= baseline->pieceLimits.front().velocity / 2.0, "materialization correction should report the tightened effective piece limits");
-        require(corrected->diagnostics.velocitySeedDuration > baseline->diagnostics.velocitySeedDuration, "a two-times local time scale should slow the corrected path");
+        require(corrected->pieceLimits.size() == 2, "materialization correction should report every piece limit");
+        require(corrected->pieceLimits[0].velocity == baseline->pieceLimits[0].velocity, "materialization correction should not tighten the unrequested piece");
+        require(corrected->pieceLimits[1].velocity <= baseline->pieceLimits[1].velocity / 2.0, "materialization correction should tighten the requested non-first piece");
+        require(corrected->diagnostics.trajectoryDuration > baseline->diagnostics.trajectoryDuration, "a two-times local time scale should slow the corrected path");
 
         path_tempo::PathPlanner invalidPlanner;
         const auto invalid = invalidPlanner.solve(request, [](const auto &) -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
@@ -645,6 +943,27 @@ namespace {
 
         require(!invalid.has_value(), "an unknown materialization correction piece should be rejected");
         require(invalid.error().code == path_tempo::PlanningErrorCode::InvalidInput, "an invalid materialization correction should return an input error");
+
+        path_tempo::PathPlanner duplicatePlanner;
+        const auto duplicate = duplicatePlanner.solve(request, [](const auto &) -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
+            return std::vector {
+                path_tempo::PieceCorrection {.piece = 92, .requiredTimeScale = 1.1},
+                path_tempo::PieceCorrection {.piece = 92, .requiredTimeScale = 1.2},
+            };
+        });
+
+        require(!duplicate.has_value(), "duplicate materialization corrections should be rejected");
+        require(duplicate.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a duplicate materialization correction should return an input error");
+
+        auto onePassRequest = request;
+        onePassRequest.settings.maximumCorrectionPasses = 1;
+        path_tempo::PathPlanner exhaustedPlanner;
+        const auto exhausted = exhaustedPlanner.solve(onePassRequest, [](const auto &) -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
+            return std::vector {path_tempo::PieceCorrection {.piece = 92, .requiredTimeScale = 2.0}};
+        });
+
+        require(!exhausted.has_value(), "a materialization correction should fail when its pass budget is exhausted");
+        require(exhausted.error().message.contains("materialization correction"), "correction exhaustion should identify materialization as its source");
     }
 }
 int main() {
@@ -654,17 +973,24 @@ int main() {
     testArcSampling();
     testBSplineSampling();
     testUnclampedNonUniformBSplineSampling();
+    testBSplineKnotScaleInvariance();
     testNurbsSampling();
+    testNurbsWeightScaleInvariance();
     testCubicTimeSegment();
     testRestToRestTransition();
     testMovingBoundaryTransition();
     testUnboundedAccelerationCruise();
     testInvalidTransition();
+    testTransitionLimitValidation();
+    testShortTransitionVelocityTolerance();
     testVelocityReachability();
+    testPathInputValidation();
     testMultiPiecePathPlanning();
+    testMultiPiecePathUsesNonzeroBoundaryAcceleration();
     testMultiPiecePathRejectsTangentDiscontinuity();
     testCurvedPathPlanning();
     testCurvedBoundaryRejectsGeometricJerkViolation();
+    testTinyNonzeroGeometryConstrainsBoundaryVelocity();
     testMultiPieceCurvedPlanning();
     testCurvedMovingBoundaryStates();
     testMaterializationCorrectionCallback();

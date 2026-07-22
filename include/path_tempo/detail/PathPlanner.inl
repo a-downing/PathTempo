@@ -6,9 +6,9 @@
 
 namespace path_tempo {
     namespace detail {
-        // Arc-length derivatives below this magnitude do not produce a stable
-        // finite constraint quotient in double precision and are treated as zero.
-        inline constexpr double GEOMETRY_COMPONENT_ZERO_TOLERANCE = 1e-15;
+        // Tiny tangent components do not produce stable finite constraint
+        // quotients in double precision and are treated as zero.
+        inline constexpr double TANGENT_COMPONENT_ZERO_TOLERANCE = 1e-15;
         // The squared tangent norm accumulates one rounding contribution per
         // coordinate; 1e-9 accepts sampled unit vectors without masking bad input.
         inline constexpr double UNIT_TANGENT_SQUARED_TOLERANCE = 1e-9;
@@ -35,7 +35,7 @@ namespace path_tempo {
             });
         }
 
-        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || request.settings.maximumCorrectionPasses == 0) {
+        if (!std::isfinite(request.beginning.velocity) || !std::isfinite(request.beginning.acceleration) || !std::isfinite(request.ending.velocity) || !std::isfinite(request.ending.acceleration) || request.beginning.velocity < 0.0 || request.ending.velocity < 0.0 || request.settings.maximumCorrectionPasses == 0 || (request.settings.boundaryAccelerationMode != BoundaryAccelerationMode::Zero && request.settings.boundaryAccelerationMode != BoundaryAccelerationMode::Optimized)) {
             return std::unexpected(PlanningError {
                 .code = PlanningErrorCode::InvalidInput,
                 .message = "path planning received invalid boundary state or solver settings",
@@ -51,11 +51,14 @@ namespace path_tempo {
 
         std::vector<LocalPiece> localPieces;
         localPieces.reserve(request.pieces.size());
+        PieceIndexMap pieceIndices;
+        pieceIndices.reserve(request.pieces.size());
 
         for (std::size_t pieceIndex = 0; pieceIndex < request.pieces.size(); ++pieceIndex) {
             const auto &piece = request.pieces[pieceIndex];
+            const auto inserted = pieceIndices.emplace(piece.id, pieceIndex).second;
 
-            if (std::ranges::any_of(localPieces, [&](const LocalPiece &existing) { return existing.id == piece.id; })) {
+            if (!inserted) {
                 return std::unexpected(PlanningError {
                     .code = PlanningErrorCode::InvalidInput,
                     .message = std::format("path piece {} repeats piece ID {}", pieceIndex, piece.id),
@@ -69,17 +72,34 @@ namespace path_tempo {
                 });
             }
 
+            if (std::isnan(piece.initialLimits.velocity) || piece.initialLimits.velocity <= 0.0 || std::isnan(piece.initialLimits.acceleration) || piece.initialLimits.acceleration <= 0.0 || std::isnan(piece.initialLimits.jerk) || piece.initialLimits.jerk <= 0.0) {
+                return std::unexpected(PlanningError {
+                    .code = PlanningErrorCode::InvalidInput,
+                    .message = std::format("path piece {} has invalid initial scalar limits", pieceIndex),
+                });
+            }
+
             auto maximumVelocity = std::min(piece.maxVelocity, piece.initialLimits.velocity);
             auto maximumAcceleration = std::min(request.limits.pathAcceleration, piece.initialLimits.acceleration);
             auto maximumJerk = std::min(request.limits.pathJerk, piece.initialLimits.jerk);
+            auto requiresCoupledCheck = false;
             auto previousDistance = -1.0;
             std::vector<LocalPiece::Station> stations;
             stations.reserve(piece.stations.size());
 
             for (std::size_t stationIndex = 0; stationIndex < piece.stations.size(); ++stationIndex) {
                 const auto &station = piece.stations[stationIndex];
+                auto stationDistance = station.distance;
+                const auto endpointTolerance = std::max(detail::STATION_DISTANCE_ABSOLUTE_TOLERANCE, piece.length * detail::STATION_DISTANCE_RELATIVE_TOLERANCE);
 
-                if (!std::isfinite(station.distance) || station.distance < previousDistance || station.distance < 0.0 || station.distance > piece.length) {
+                if (stationIndex == 0 && std::abs(stationDistance) <= detail::STATION_DISTANCE_ABSOLUTE_TOLERANCE) {
+                    stationDistance = 0.0;
+                }
+                if (stationIndex + 1 == piece.stations.size() && std::abs(stationDistance - piece.length) <= endpointTolerance) {
+                    stationDistance = piece.length;
+                }
+
+                if (!std::isfinite(stationDistance) || stationDistance < previousDistance || stationDistance < 0.0 || stationDistance > piece.length) {
                     return std::unexpected(PlanningError {
                         .code = PlanningErrorCode::InvalidInput,
                         .message = std::format("path piece {} has invalid station ordering at station {}: distance={} previous={} length={}", pieceIndex, stationIndex, station.distance, previousDistance, piece.length),
@@ -105,17 +125,19 @@ namespace path_tempo {
 
                     tangentSquared += tangent * tangent;
 
-                    if (std::abs(tangent) > detail::GEOMETRY_COMPONENT_ZERO_TOLERANCE) {
+                    if (std::abs(tangent) > detail::TANGENT_COMPONENT_ZERO_TOLERANCE) {
                         maximumVelocity = std::min(maximumVelocity, coordinateVelocity / std::abs(tangent));
                         maximumAcceleration = std::min(maximumAcceleration, coordinateAcceleration / std::abs(tangent));
                         maximumJerk = std::min(maximumJerk, coordinateJerk / std::abs(tangent));
                     }
 
-                    if (std::abs(curvature) > detail::GEOMETRY_COMPONENT_ZERO_TOLERANCE) {
+                    if (curvature != 0.0) {
+                        requiresCoupledCheck = true;
                         maximumVelocity = std::min(maximumVelocity, std::sqrt(coordinateAcceleration / std::abs(curvature)));
                     }
 
-                    if (std::abs(thirdDerivative) > detail::GEOMETRY_COMPONENT_ZERO_TOLERANCE) {
+                    if (thirdDerivative != 0.0) {
+                        requiresCoupledCheck = true;
                         maximumVelocity = std::min(maximumVelocity, std::cbrt(coordinateJerk / std::abs(thirdDerivative)));
                     }
                 }
@@ -127,36 +149,33 @@ namespace path_tempo {
                     });
                 }
 
-                auto curvatureSquared = 0.0;
-                auto thirdDerivativeSquared = 0.0;
+                auto curvatureMagnitude = 0.0;
+                auto thirdDerivativeMagnitude = 0.0;
 
                 for (std::size_t axis = 0; axis < DoF; ++axis) {
-                    curvatureSquared += station.curvature[axis] * station.curvature[axis];
-                    thirdDerivativeSquared += station.thirdDerivative[axis] * station.thirdDerivative[axis];
+                    curvatureMagnitude = std::hypot(curvatureMagnitude, station.curvature[axis]);
+                    thirdDerivativeMagnitude = std::hypot(thirdDerivativeMagnitude, station.thirdDerivative[axis]);
                 }
 
-                const auto curvatureMagnitude = std::sqrt(curvatureSquared);
-                const auto thirdDerivativeMagnitude = std::sqrt(thirdDerivativeSquared);
-
-                if (curvatureMagnitude > detail::GEOMETRY_COMPONENT_ZERO_TOLERANCE) {
+                if (curvatureMagnitude != 0.0) {
                     maximumVelocity = std::min(maximumVelocity, std::sqrt(request.limits.pathAcceleration / curvatureMagnitude));
                 }
 
-                if (thirdDerivativeMagnitude > detail::GEOMETRY_COMPONENT_ZERO_TOLERANCE) {
+                if (thirdDerivativeMagnitude != 0.0) {
                     maximumVelocity = std::min(maximumVelocity, std::cbrt(request.limits.pathJerk / thirdDerivativeMagnitude));
                 }
 
                 stations.push_back({
-                    .distance = station.distance,
+                    .distance = stationDistance,
                     .tangent = station.tangent,
                     .curvature = station.curvature,
                     .thirdDerivative = station.thirdDerivative,
                 });
 
-                previousDistance = station.distance;
+                previousDistance = stationDistance;
             }
 
-            if (std::abs(piece.stations.front().distance) > detail::STATION_DISTANCE_ABSOLUTE_TOLERANCE || std::abs(piece.stations.back().distance - piece.length) > std::max(detail::STATION_DISTANCE_ABSOLUTE_TOLERANCE, piece.length * detail::STATION_DISTANCE_RELATIVE_TOLERANCE)) {
+            if (stations.front().distance != 0.0 || stations.back().distance != piece.length) {
                 return std::unexpected(PlanningError {
                     .code = PlanningErrorCode::InvalidInput,
                     .message = std::format("path piece {} stations do not cover the complete piece", pieceIndex),
@@ -170,7 +189,7 @@ namespace path_tempo {
                 });
             }
 
-            localPieces.push_back({piece.id, piece.length, maximumVelocity, maximumAcceleration, maximumJerk, std::move(stations)});
+            localPieces.push_back({piece.id, piece.length, maximumVelocity, maximumAcceleration, maximumJerk, requiresCoupledCheck, std::move(stations)});
 
             if (pieceIndex > 0) {
                 const auto &previous = request.pieces[pieceIndex - 1].stations.back();
@@ -205,6 +224,6 @@ namespace path_tempo {
             .coordinateJerk = {request.limits.coordinateJerk.begin(), request.limits.coordinateJerk.end()},
         };
 
-        return solveLocal(localPieces, request.beginning, request.ending, coupledLimits, request.settings, materializationCorrection);
+        return solveLocal(localPieces, pieceIndices, request.beginning, request.ending, coupledLimits, request.settings, materializationCorrection);
     }
 }
