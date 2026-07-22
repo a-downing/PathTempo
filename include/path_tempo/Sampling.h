@@ -277,6 +277,31 @@ namespace path_tempo {
             static constexpr std::size_t HOMOGENEOUS_SIZE = DoF + 1;
             std::array<DerivativeSpline<HOMOGENEOUS_SIZE>, 4> derivatives;
 
+            std::expected<double, SamplingError> parametricSpeed(const double parameter, const std::size_t span) const {
+                const auto &positionSpline = derivatives[0];
+                const auto &firstSpline = derivatives[1];
+                const auto homogeneousPosition = evaluateBSpline(positionSpline.degree, std::span<const std::array<double, HOMOGENEOUS_SIZE>> {positionSpline.controls}, positionSpline.knots, parameter, span);
+                const auto homogeneousFirst = evaluateBSpline(firstSpline.degree, std::span<const std::array<double, HOMOGENEOUS_SIZE>> {firstSpline.controls}, firstSpline.knots, parameter, span - 1);
+                const auto weight = homogeneousPosition[DoF];
+
+                if (!std::isfinite(weight) || weight <= 0.0) {
+                    return std::unexpected(SamplingError::IrregularCurve);
+                }
+
+                Vector<DoF> first {};
+
+                for (std::size_t component = 0; component < DoF; ++component) {
+                    const auto position = homogeneousPosition[component] / weight;
+                    first[component] = (homogeneousFirst[component] - homogeneousFirst[DoF] * position) / weight;
+                }
+
+                if (!finite(first)) {
+                    return std::unexpected(SamplingError::NonFiniteGeometry);
+                }
+
+                return magnitude(first);
+            }
+
             std::expected<std::array<Vector<DoF>, 4>, SamplingError> operator()(const double parameter, const std::size_t span) const {
                 std::array<std::array<double, HOMOGENEOUS_SIZE>, 4> homogeneous {};
 
@@ -365,8 +390,13 @@ namespace path_tempo {
             }
 
             const auto speed = [&](const double parameter) {
-                const auto derivatives = evaluate(parameter, span);
-                return derivatives ? magnitude((*derivatives)[1]) : std::numeric_limits<double>::quiet_NaN();
+                if constexpr (requires { evaluate.parametricSpeed(parameter, span); }) {
+                    const auto value = evaluate.parametricSpeed(parameter, span);
+                    return value ? *value : std::numeric_limits<double>::quiet_NaN();
+                } else {
+                    const auto derivatives = evaluate(parameter, span);
+                    return derivatives ? magnitude((*derivatives)[1]) : std::numeric_limits<double>::quiet_NaN();
+                }
             };
             SampledPathPiece<DoF> result;
             result.id = id;

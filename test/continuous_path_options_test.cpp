@@ -1,3 +1,4 @@
+#include "../examples/continuous_path_geometry.h"
 #include "../examples/continuous_path_options.h"
 
 #include <cstdlib>
@@ -66,6 +67,17 @@ namespace {
         require(scaled.has_value() && *scaled == 6.0, "finite velocity scaling should succeed");
         require(!path_tempo::example::scaleVelocityLimit(std::numeric_limits<double>::max(), 2.0), "overflowing velocity scaling should fail");
     }
+
+    void testCurveIntervalCanonicalization() {
+        constexpr double length = 1.0;
+        const auto lineEnd = path_tempo::example::canonicalCurveIntervalEnd(0.0, length + 5e-11, length, "line");
+        const auto arcEnd = path_tempo::example::canonicalCurveIntervalEnd(0.25, length + 5e-11, length, "arc");
+
+        require(lineEnd.has_value() && *lineEnd == length, "a tolerated line endpoint excess should be canonicalized to the geometry length");
+        require(arcEnd.has_value() && *arcEnd == length, "a tolerated arc endpoint excess should be canonicalized to the geometry length");
+        require(!path_tempo::example::canonicalCurveIntervalEnd(0.0, length + 2e-10, length, "line"), "a material interval excess should be rejected");
+        require(!path_tempo::example::canonicalCurveIntervalEnd(length, length + 5e-11, length, "arc"), "an interval beginning at the geometry end should be rejected");
+    }
 }
 
 int main() {
@@ -74,6 +86,7 @@ int main() {
     testRequiredArguments();
     testInvalidArguments();
     testVelocityLimitScaling();
+    testCurveIntervalCanonicalization();
 
     return 0;
 }

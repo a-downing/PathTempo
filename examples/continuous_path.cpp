@@ -1,3 +1,4 @@
+#include "continuous_path_geometry.h"
 #include "continuous_path_options.h"
 #include "endpoint_exact_arc.h"
 #include "geometry_text_loader.h"
@@ -59,14 +60,15 @@ namespace {
                         delta[component] = value.to[component] - value.from[component];
                     }
                     const auto fullLength = positionMagnitude(delta);
-                    if (curve.toDistance > fullLength + 1e-10 * std::max(1.0, fullLength)) {
-                        return std::unexpected("line interval exceeds its geometry length");
+                    const auto toDistance = path_tempo::example::canonicalCurveIntervalEnd(curve.fromDistance, curve.toDistance, fullLength, "line");
+                    if (!toDistance) {
+                        return std::unexpected(toDistance.error());
                     }
 
                     path_tempo::Line<DOF> line;
                     for (std::size_t component = 0; component < DOF; ++component) {
                         line.from[component] = value.from[component] + delta[component] * curve.fromDistance / fullLength;
-                        line.to[component] = value.from[component] + delta[component] * curve.toDistance / fullLength;
+                        line.to[component] = value.from[component] + delta[component] * *toDistance / fullLength;
                     }
 
                     auto piece = path_tempo::sampleLine(line, nextId, curve.feeds.front());
@@ -85,12 +87,13 @@ namespace {
                         return std::unexpected(arc.error());
                     }
 
-                    if (curve.toDistance > arc->length() + 1e-10 * std::max(1.0, arc->length())) {
-                        return std::unexpected("arc interval exceeds its geometry length");
+                    const auto toDistance = path_tempo::example::canonicalCurveIntervalEnd(curve.fromDistance, curve.toDistance, arc->length(), "arc");
+                    if (!toDistance) {
+                        return std::unexpected(toDistance.error());
                     }
 
                     auto piece = path_tempo::sampleArcLengthCurve<DOF>(
-                        curve.toDistance - curve.fromDistance, nextId, curve.feeds.front(),
+                        *toDistance - curve.fromDistance, nextId, curve.feeds.front(),
                         CURVE_SAMPLE_INTERVALS, [&](const double distance) {
                             return arc->stateAtDistance(curve.fromDistance + distance);
                         });

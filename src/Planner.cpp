@@ -32,12 +32,9 @@ namespace path_tempo {
         // Constraint comparisons allow relative roundoff from coupled polynomial
         // evaluation without accepting a materially over-limit state.
         constexpr double CONSTRAINT_RELATIVE_TOLERANCE = 1e-10;
-        // Infinite-acceleration transitions still require numerically identical
-        // boundary states; this absorbs only absolute representation noise.
-        constexpr double BOUNDARY_STATE_ABSOLUTE_TOLERANCE = 1e-12;
-        // Phases this short cannot materially affect a double-precision time law
-        // and retaining them can create non-increasing phase boundaries.
-        constexpr double MINIMUM_PHASE_DURATION = 1e-12;
+        // Ruckig can leave a tiny negative residual when its phase durations are
+        // summed independently. Positive phases are always retained.
+        constexpr double NEGATIVE_PHASE_DURATION_TOLERANCE = 1e-12;
         // Ruckig endpoint reconstruction accumulates error with distance and
         // speed, so validation uses both an absolute floor and relative term.
         constexpr double TRANSITION_ABSOLUTE_TOLERANCE = 1e-12;
@@ -69,8 +66,8 @@ namespace path_tempo {
         // Smoothing stops once the residual slope-rate violation is below
         // meaningful acceleration resolution.
         constexpr double SLOPE_SMOOTHING_CONVERGENCE_TOLERANCE = 1e-9;
-        // Failed non-zero boundary-state proposals are repeatedly moved halfway
-        // toward the conservative zero-acceleration profile. Extra rounds leave
+        // Failed non-zero boundary-state proposals repeatedly retain sixty-five
+        // percent of their weight toward the proposed profile. Extra rounds leave
         // room for those reductions to propagate along the complete path.
         constexpr std::size_t BOUNDARY_REPAIR_EXTRA_ROUNDS = 24;
         constexpr double BOUNDARY_REPAIR_MINIMUM_WEIGHT = 1.0 / (1u << 20);
@@ -643,10 +640,19 @@ namespace path_tempo {
         }
 
         if (std::isinf(request.maximumAcceleration)) {
-            if (std::abs(from.velocity - to.velocity) > BOUNDARY_STATE_ABSOLUTE_TOLERANCE || from.velocity <= 0.0 || std::abs(from.acceleration) > BOUNDARY_STATE_ABSOLUTE_TOLERANCE || std::abs(to.acceleration) > BOUNDARY_STATE_ABSOLUTE_TOLERANCE) {
+            if (from.velocity != to.velocity || from.velocity <= 0.0 || from.acceleration != 0.0 || to.acceleration != 0.0) {
                 return std::unexpected(PlanningError {
                     .code = PlanningErrorCode::InvalidInput,
                     .message = "unbounded-acceleration local time law requires equal positive speeds and zero acceleration",
+                });
+            }
+
+            const auto duration = request.length / from.velocity;
+
+            if (!std::isfinite(duration) || duration <= 0.0) {
+                return std::unexpected(PlanningError {
+                    .code = PlanningErrorCode::InvalidInput,
+                    .message = "unbounded-acceleration local time law produced a non-positive or non-finite duration",
                 });
             }
 
@@ -655,7 +661,7 @@ namespace path_tempo {
             result.ending = to;
             result.push({
                 .piece = request.piece,
-                .duration = request.length / from.velocity,
+                .duration = duration,
                 .c0 = 0.0,
                 .c1 = from.velocity,
             });
@@ -694,13 +700,13 @@ namespace path_tempo {
 
         auto invalidPhase = false;
         const auto appendPhase = [&](const double duration, const double jerk) -> bool {
-            if (!std::isfinite(duration) || !std::isfinite(jerk) || duration < -MINIMUM_PHASE_DURATION) {
+            if (!std::isfinite(duration) || !std::isfinite(jerk) || duration < -NEGATIVE_PHASE_DURATION_TOLERANCE) {
                 invalidPhase = true;
 
                 return false;
             }
 
-            if (duration <= MINIMUM_PHASE_DURATION) {
+            if (duration <= 0.0) {
                 return true;
             }
 
@@ -1097,7 +1103,7 @@ namespace path_tempo {
                 }
 
                 // Repair infeasible proposals through a local homotopy. Each
-                // affected boundary moves halfway toward the conservative profile;
+                // affected boundary retains sixty-five percent of its prior weight;
                 // exact transition solves decide feasibility at every step. The
                 // zero weight is the original zero-acceleration construction.
                 const auto maximumRepairRounds = 2 * localPieces.size() + BOUNDARY_REPAIR_EXTRA_ROUNDS;

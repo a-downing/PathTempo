@@ -72,7 +72,7 @@ to 10 0 0
 end_curve
 ```
 
-The source line must have positive length. The interval may select a subsegment, but `to-distance` may not exceed the source line length. The continuous-path example requires exactly one feed and produces one PathPiece for the selected interval.
+The source line must have positive length. The interval may select a subsegment, but `to-distance` may not materially exceed the source line length. An excess within `1e-10 * max(1, source-length)` is treated as serialized roundoff and canonicalized to the exact source length. The continuous-path example requires exactly one feed and produces one PathPiece for the selected interval.
 
 ## Arc
 
@@ -100,7 +100,7 @@ end_curve
 
 The axis must be finite and non-zero. The radial components of both endpoints relative to the center and axis must be non-zero. The axis establishes the positive sweep direction by the right-hand rule. Coincident start and end radial arms represent a complete positive revolution. A displacement along the axis produces a helical arc.
 
-The interval may select a subinterval, but `to-distance` may not exceed the computed arc length. The continuous-path example requires exactly one feed and produces one PathPiece for the selected interval.
+The interval may select a subinterval, but `to-distance` may not materially exceed the computed arc length. An excess within `1e-10 * max(1, arc-length)` is treated as serialized roundoff and canonicalized to the exact arc length. The continuous-path example requires exactly one feed and produces one PathPiece for the selected interval.
 
 ## B-spline
 

@@ -63,6 +63,7 @@ if (BUILD_TESTING)
 
     add_executable(path_tempo_continuous_path_options_tests
         test/continuous_path_options_test.cpp
+        examples/continuous_path_geometry.cpp
         examples/continuous_path_options.cpp)
     target_compile_features(path_tempo_continuous_path_options_tests PRIVATE cxx_std_23)
 
@@ -96,6 +97,7 @@ endif()
 
 add_executable(path_tempo_continuous_path_example
     examples/continuous_path.cpp
+    examples/continuous_path_geometry.cpp
     examples/continuous_path_options.cpp
     examples/endpoint_exact_arc.cpp
     examples/geometry_text_loader.cpp)

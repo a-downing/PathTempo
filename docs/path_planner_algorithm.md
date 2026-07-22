@@ -68,7 +68,8 @@ The following values are part of the specified behavior:
 | Geometry component zero | `1e-15` | Negligible tangent components in scalar-limit quotients |
 | Unit-tangent squared tolerance | `1e-9` | Validates arc-length parameterization |
 | Tangent continuity tolerance | `1e-9` | Validates adjacent pieces |
-| Curvature continuity tolerance | `1e-8` | Validates adjacent pieces |
+| Curvature continuity scaled absolute tolerance | `1e-9 / max(leftLength, rightLength)` | Covers near-zero curvature noise in local geometry units |
+| Curvature continuity relative tolerance | `1e-8 * max(abs(leftCurvature), abs(rightCurvature))` | Validates adjacent nonzero curvature components |
 | Station-distance absolute tolerance | `1e-12` | Validates endpoint coverage |
 | Station-distance relative tolerance | `1e-10` | Validates endpoint coverage |
 | Transition-distance absolute tolerance | `1e-12` | Validates scalar endpoints and matches samples to scalar phases |
@@ -137,7 +138,7 @@ V = min(V, cbrt(pathJerkLimit / norm(q3)))
 
 These limits intentionally separate the derivative terms. They are safe seeds, not a proof of the complete coupled acceleration and jerk expressions. The coupled check later evaluates all terms together.
 
-The effective `V`, `A`, and `J` of every piece must be finite and positive. Each station tangent must have squared norm within `1e-9` of one. Differential stations must cover the complete piece in nondecreasing distance order: the first distance must be within `1e-12` of zero, and the last must be within `max(1e-12, 1e-10 * pieceLength)` of the piece length. Adjacent tangent components must agree within `1e-9`, and adjacent curvature components within `1e-8`, because a single velocity and acceleration state is shared at their boundary.
+The effective `V`, `A`, and `J` of every piece must be finite and positive. Each station tangent must have squared norm within `1e-9` of one. Differential stations must cover the complete piece in nondecreasing distance order: the first distance must be within `1e-12` of zero, and the last must be within `max(1e-12, 1e-10 * pieceLength)` of the piece length. Adjacent tangent components must agree within `1e-9`. For each adjacent curvature component, define `curvatureMagnitude = max(abs(leftCurvature), abs(rightCurvature))` and `lengthScale = max(leftLength, rightLength)`; the component difference must not exceed `1e-9 / lengthScale + 1e-8 * curvatureMagnitude`. A single velocity and acceleration state is shared at the boundary.
 
 Define boundary velocity caps:
 

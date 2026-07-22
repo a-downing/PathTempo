@@ -227,6 +227,39 @@ namespace {
         require(std::abs(sampled->front().length - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE, "uniform NURBS weight scaling should preserve curve length");
     }
 
+    void testParametricSamplingUsesSpeedOnlyEvaluator() {
+        struct CountingEvaluator {
+            mutable std::size_t stateCalls = 0;
+            mutable std::size_t speedCalls = 0;
+
+            std::expected<std::array<path_tempo::Vector<1>, 4>, path_tempo::SamplingError> operator()(const double parameter, const std::size_t) const {
+                ++stateCalls;
+
+                return std::array<path_tempo::Vector<1>, 4> {{
+                    {parameter},
+                    {1.0},
+                    {},
+                    {},
+                }};
+            }
+
+            std::expected<double, path_tempo::SamplingError> parametricSpeed(const double, const std::size_t) const {
+                ++speedCalls;
+
+                return 1.0;
+            }
+        };
+
+        constexpr std::size_t sampleIntervals = 4;
+        const CountingEvaluator evaluator;
+        const auto sampled = path_tempo::detail::sampleParametricInterval<1>(evaluator, 0.0, 1.0, 0, 33, 2.0, sampleIntervals);
+
+        require(sampled.has_value(), "parametric sampling with a speed-only evaluator should succeed");
+        require(evaluator.stateCalls == sampleIntervals + 1, "full derivative evaluation should be limited to differential stations");
+        require(evaluator.speedCalls > 0, "arc-length integration should use the speed-only evaluator");
+        require(std::abs(sampled->length - 1.0) <= ANALYTIC_RESULT_TOLERANCE, "speed-only integration should preserve curve length");
+    }
+
     void testCubicTimeSegment() {
         const path_tempo::CubicTimeSegment segment {
             .piece = 4,
@@ -313,6 +346,80 @@ namespace {
         require(transition.has_value(), "unbounded-acceleration cruise should solve");
         require(transition->size() == 1, "unbounded-acceleration cruise should contain one segment");
         require(transition->duration() == 2.0, "unbounded-acceleration cruise should use distance divided by velocity");
+    }
+
+    void testUnboundedAccelerationCruiseValidation() {
+        path_tempo::ScalarTransitionPlanner planner;
+        const auto unequalVelocity = planner.solve({
+            .piece = 25,
+            .length = 3.0,
+            .beginning = {.velocity = 1.5},
+            .ending = {.velocity = std::nextafter(1.5, 2.0)},
+            .maximumVelocity = 2.0,
+            .maximumAcceleration = std::numeric_limits<double>::infinity(),
+            .maximumJerk = 4.0,
+        });
+
+        require(!unequalVelocity.has_value(), "an unbounded-acceleration cruise should reject unequal boundary velocities");
+        require(unequalVelocity.error().code == path_tempo::PlanningErrorCode::InvalidInput, "unequal cruise velocities should return an input error");
+
+        const auto nonzeroAcceleration = planner.solve({
+            .piece = 26,
+            .length = 3.0,
+            .beginning = {.velocity = 1.5, .acceleration = std::numeric_limits<double>::denorm_min()},
+            .ending = {.velocity = 1.5},
+            .maximumVelocity = 2.0,
+            .maximumAcceleration = std::numeric_limits<double>::infinity(),
+            .maximumJerk = 4.0,
+        });
+
+        require(!nonzeroAcceleration.has_value(), "an unbounded-acceleration cruise should reject nonzero boundary acceleration");
+        require(nonzeroAcceleration.error().code == path_tempo::PlanningErrorCode::InvalidInput, "nonzero cruise acceleration should return an input error");
+
+        const auto infiniteDuration = planner.solve({
+            .piece = 27,
+            .length = std::numeric_limits<double>::max(),
+            .beginning = {.velocity = std::numeric_limits<double>::denorm_min()},
+            .ending = {.velocity = std::numeric_limits<double>::denorm_min()},
+            .maximumVelocity = 1.0,
+            .maximumAcceleration = std::numeric_limits<double>::infinity(),
+            .maximumJerk = 4.0,
+        });
+
+        require(!infiniteDuration.has_value(), "an unbounded-acceleration cruise should reject a non-finite duration");
+        require(infiniteDuration.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a non-finite cruise duration should return an input error");
+
+        const auto zeroDuration = planner.solve({
+            .piece = 29,
+            .length = std::numeric_limits<double>::denorm_min(),
+            .beginning = {.velocity = std::numeric_limits<double>::max()},
+            .ending = {.velocity = std::numeric_limits<double>::max()},
+            .maximumVelocity = std::numeric_limits<double>::max(),
+            .maximumAcceleration = std::numeric_limits<double>::infinity(),
+            .maximumJerk = 4.0,
+        });
+
+        require(!zeroDuration.has_value(), "an unbounded-acceleration cruise should reject an underflowed zero duration");
+        require(zeroDuration.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a zero cruise duration should return an input error");
+    }
+
+    void testSubPicosecondCruisePhase() {
+        constexpr double length = 5e-13;
+        path_tempo::ScalarTransitionPlanner planner;
+        const auto transition = planner.solve({
+            .piece = 28,
+            .length = length,
+            .beginning = {.velocity = 1.0},
+            .ending = {.velocity = 1.0},
+            .maximumVelocity = 2.0,
+            .maximumAcceleration = 1.0,
+            .maximumJerk = 4.0,
+        });
+
+        require(transition.has_value(), "a positive sub-picosecond cruise phase should be retained");
+        require(!transition->empty(), "a positive sub-picosecond cruise should emit a segment");
+        require(transition->duration() > 0.0 && transition->duration() <= 1e-12, "the retained cruise should preserve its short positive duration");
+        require(std::abs(transition->back().position(transition->back().duration) - length) <= std::numeric_limits<double>::epsilon() * length, "the retained cruise should preserve its endpoint");
     }
 
     void testInvalidTransition() {
@@ -1117,10 +1224,13 @@ int main() {
     testNurbsSampling();
     testNurbsGeometricScaleInvariance();
     testNurbsWeightScaleInvariance();
+    testParametricSamplingUsesSpeedOnlyEvaluator();
     testCubicTimeSegment();
     testRestToRestTransition();
     testMovingBoundaryTransition();
     testUnboundedAccelerationCruise();
+    testUnboundedAccelerationCruiseValidation();
+    testSubPicosecondCruisePhase();
     testInvalidTransition();
     testTransitionLimitValidation();
     testShortTransitionVelocityTolerance();
