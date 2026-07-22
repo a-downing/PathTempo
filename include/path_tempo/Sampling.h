@@ -66,13 +66,13 @@ namespace path_tempo {
     namespace detail {
         template<std::size_t DoF>
         double magnitude(const Vector<DoF> &value) {
-            auto squared = 0.0;
+            auto result = 0.0;
 
             for (const auto component : value) {
-                squared += component * component;
+                result = std::hypot(result, component);
             }
 
-            return std::sqrt(squared);
+            return result;
         }
 
         template<std::size_t DoF>
@@ -88,8 +88,9 @@ namespace path_tempo {
         // Arc frames normally come from normalized construction geometry. This
         // relative tolerance accepts its roundoff without treating an ellipse as an arc.
         inline constexpr double ARC_FRAME_RELATIVE_TOLERANCE = 1e-10;
-        // Adaptive Simpson integration at this relative scale keeps station
-        // distances well below the planner's geometric continuity tolerances.
+        // The absolute term covers arithmetic roundoff relative to the sampled
+        // speed scale; the relative term controls quadrature truncation error.
+        inline constexpr double ARC_LENGTH_ABSOLUTE_ROUNDOFF_FACTOR = 64.0 * std::numeric_limits<double>::epsilon();
         inline constexpr double ARC_LENGTH_RELATIVE_TOLERANCE = 1e-12;
         // Twenty subdivisions provide a hard recursion bound while permitting
         // over a million leaf intervals for unusually distorted parameterizations.
@@ -163,7 +164,10 @@ namespace path_tempo {
             const auto middleValue = function(middle);
             const auto toValue = function(to);
             const auto estimate = (to - from) * (fromValue + 4.0 * middleValue + toValue) / 6.0;
-            const auto tolerance = ARC_LENGTH_RELATIVE_TOLERANCE * std::max(1.0, std::abs(estimate));
+            const auto speedScale = std::max({std::abs(fromValue), std::abs(middleValue), std::abs(toValue)});
+            const auto absoluteTolerance = ARC_LENGTH_ABSOLUTE_ROUNDOFF_FACTOR * (to - from) * speedScale;
+            const auto relativeTolerance = ARC_LENGTH_RELATIVE_TOLERANCE * std::abs(estimate);
+            const auto tolerance = std::max(std::numeric_limits<double>::denorm_min(), absoluteTolerance + relativeTolerance);
 
             return adaptiveSimpson(function, from, to, tolerance, fromValue, middleValue, toValue, estimate, 0);
         }

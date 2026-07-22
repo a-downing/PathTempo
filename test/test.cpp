@@ -58,6 +58,20 @@ namespace {
         require(std::abs(sampled->stations.front().tangent[1] - 0.8) <= ANALYTIC_RESULT_TOLERANCE, "line tangent Y should be normalized");
     }
 
+    void testTinyLineSampling() {
+        constexpr double scale = 1e-200;
+        const path_tempo::Line<2> line {
+            .from = {0.0, 0.0},
+            .to = {3.0 * scale, 4.0 * scale},
+        };
+        const auto sampled = path_tempo::sampleLine(line, 8, 2.0);
+
+        require(sampled.has_value(), "a representable tiny line should sample without norm underflow");
+        require(std::abs(sampled->length / scale - 5.0) <= ANALYTIC_RESULT_TOLERANCE, "tiny line length should retain its geometric scale");
+        require(std::abs(sampled->stations.front().tangent[0] - 0.6) <= ANALYTIC_RESULT_TOLERANCE, "tiny line tangent X should be normalized");
+        require(std::abs(sampled->stations.front().tangent[1] - 0.8) <= ANALYTIC_RESULT_TOLERANCE, "tiny line tangent Y should be normalized");
+    }
+
     void testLineSamplingErrors() {
         const path_tempo::Line<3> line {
             .from = {0.0, 0.0, 0.0},
@@ -175,6 +189,27 @@ namespace {
         require(sampled.has_value(), "quadratic NURBS sampling should succeed");
         require(sampled->size() == 1 && sampled->front().stations.size() == 17, "a single NURBS knot interval should produce one sampled piece");
         require(std::abs(sampled->front().length - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE, "rational quarter-circle sampling should recover exact arc length");
+    }
+
+    void testNurbsGeometricScaleInvariance() {
+        constexpr double scale = 1e-9;
+        const std::array<path_tempo::Vector<2>, 3> controls {{
+            {scale, 0.0},
+            {scale, scale},
+            {0.0, scale},
+        }};
+        const std::array weights {1.0, std::numbers::sqrt2 / 2.0, 1.0};
+        const std::array knots {0.0, 0.0, 0.0, 1.0, 1.0, 1.0};
+        const auto sampled = path_tempo::sampleNurbs(path_tempo::Nurbs<2> {
+            .degree = 2,
+            .controls = controls,
+            .weights = weights,
+            .knots = knots,
+        }, 32, 2.0, 16);
+
+        require(sampled.has_value(), "a uniformly tiny NURBS curve should sample");
+        require(std::abs(sampled->front().length / scale - std::numbers::pi / 2.0) <= SOLVER_ENDPOINT_TOLERANCE,
+            "arc-length integration should retain relative accuracy below unit scale");
     }
 
     void testNurbsWeightScaleInvariance() {
@@ -620,6 +655,50 @@ namespace {
         require(planned.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a tangent discontinuity should be an input error");
     }
 
+    void testCurvatureContinuityUsesGeometricScale() {
+        const auto solveBoundary = [](const double length, const double previousCurvature, const double currentCurvature) {
+            const std::array previousStations {
+                path_tempo::DifferentialStation<2> {.distance = 0.0, .tangent = {1.0, 0.0}, .curvature = {0.0, previousCurvature}},
+                path_tempo::DifferentialStation<2> {.distance = length, .tangent = {1.0, 0.0}, .curvature = {0.0, previousCurvature}},
+            };
+            const std::array currentStations {
+                path_tempo::DifferentialStation<2> {.distance = 0.0, .tangent = {1.0, 0.0}, .curvature = {0.0, currentCurvature}},
+                path_tempo::DifferentialStation<2> {.distance = length, .tangent = {1.0, 0.0}, .curvature = {0.0, currentCurvature}},
+            };
+            const std::array pieces {
+                path_tempo::PathPiece<2> {.id = 43, .length = length, .maxVelocity = 1.0, .initialLimits = {}, .stations = previousStations},
+                path_tempo::PathPiece<2> {.id = 44, .length = length, .maxVelocity = 1.0, .initialLimits = {}, .stations = currentStations},
+            };
+            path_tempo::PathPlanner planner;
+
+            return planner.solve(path_tempo::PathPlanningRequest<2> {
+                .pieces = pieces,
+                .beginning = {},
+                .ending = {},
+                .limits = {
+                    .pathAcceleration = 1e6,
+                    .pathJerk = 1e9,
+                    .coordinateVelocity = {1.0, 1.0},
+                    .coordinateAcceleration = {1e6, 1e6},
+                    .coordinateJerk = {1e9, 1e9},
+                },
+                .settings = {.applySampledCorrections = false},
+            });
+        };
+
+        const auto baseUnits = solveBoundary(1.0, 1.0, 1.0 + 5e-9);
+        const auto smallerUnits = solveBoundary(1e-3, 1e3, 1e3 * (1.0 + 5e-9));
+        const auto nearZeroNoise = solveBoundary(1.0, 0.0, 2.5e-10);
+
+        require(baseUnits.has_value() && smallerUnits.has_value(), "equivalent relative curvature noise should be accepted in either geometric scale");
+        require(nearZeroNoise.has_value(), "near-zero spline curvature noise should be accepted");
+
+        const auto smallJump = solveBoundary(1.0, 0.0, 5e-9);
+
+        require(!smallJump.has_value(), "a small but meaningful curvature jump should not be hidden by a fixed absolute tolerance");
+        require(smallJump.error().code == path_tempo::PlanningErrorCode::InvalidInput, "a curvature discontinuity should be an input error");
+    }
+
     path_tempo::SampledPathPiece<3> sampledUnitCircleInterval(const path_tempo::PathPieceId id, const double fromAngle, const double toAngle, const double maxVelocity, const std::size_t intervals = 32) {
         const auto length = toAngle - fromAngle;
         path_tempo::SampledPathPiece<3> piece {
@@ -1029,12 +1108,14 @@ namespace {
 int main() {
     require(path_tempo::version() == PATH_TEMPO_EXPECTED_VERSION, "version should match the project version");
     testLineSampling();
+    testTinyLineSampling();
     testLineSamplingErrors();
     testArcSampling();
     testBSplineSampling();
     testUnclampedNonUniformBSplineSampling();
     testBSplineKnotScaleInvariance();
     testNurbsSampling();
+    testNurbsGeometricScaleInvariance();
     testNurbsWeightScaleInvariance();
     testCubicTimeSegment();
     testRestToRestTransition();
@@ -1048,6 +1129,7 @@ int main() {
     testMultiPiecePathPlanning();
     testMultiPiecePathUsesNonzeroBoundaryAcceleration();
     testMultiPiecePathRejectsTangentDiscontinuity();
+    testCurvatureContinuityUsesGeometricScale();
     testCurvedPathPlanning();
     testAcceptedTransitionEndpointChecksCoupledStation();
     testCurvedBoundaryRejectsGeometricJerkViolation();

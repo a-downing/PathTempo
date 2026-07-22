@@ -151,7 +151,7 @@ namespace path_tempo {
             std::vector<double> coordinateJerk;
         };
 
-        std::expected<PlannedPath, PlanningError> solveLocal(std::span<const LocalPiece> pieces, const PieceIndexMap &pieceIndices, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
+        std::expected<PlannedPath, PlanningError> solveLocal(std::vector<LocalPiece> localPieces, const PieceIndexMap &pieceIndices, BoundaryState beginning, BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection);
 
     public:
         PathPlanner();

@@ -3,6 +3,7 @@
 #include <cmath>
 #include <cstdlib>
 #include <iostream>
+#include <numbers>
 #include <string_view>
 
 namespace {
@@ -35,6 +36,27 @@ int main() {
     requirePosition(arc->positionAtParameter(0.0), source.from, "the arc should reproduce its exact start point");
     requirePosition(arc->positionAtParameter(1.0), source.to, "the arc should reproduce its exact end point");
     require(arc->length() > 0.0, "the arc should have positive length");
+
+    constexpr double tinyRadius = 1e-10;
+    const path_tempo::example::ArcGeometry tinyQuarterCircle {
+        .from = {tinyRadius, 0.0, 0.0},
+        .to = {0.0, tinyRadius, 0.0},
+        .center = {0.0, 0.0, 0.0},
+        .axis = {0.0, 0.0, 1.0},
+    };
+    const auto tinyQuarterArc = path_tempo::example::EndpointExactArc::create(tinyQuarterCircle);
+
+    require(tinyQuarterArc.has_value(), "a tiny quarter-circle should be accepted");
+    require(std::abs(tinyQuarterArc->length() / tinyRadius - std::numbers::pi / 2.0) <= TOLERANCE,
+        "a tiny quarter-circle should not be classified as a complete revolution");
+
+    auto tinyCompleteCircle = tinyQuarterCircle;
+    tinyCompleteCircle.to = tinyCompleteCircle.from;
+    const auto tinyCompleteArc = path_tempo::example::EndpointExactArc::create(tinyCompleteCircle);
+
+    require(tinyCompleteArc.has_value(), "a tiny complete circle should be accepted");
+    require(std::abs(tinyCompleteArc->length() / tinyRadius - 2.0 * std::numbers::pi) <= TOLERANCE,
+        "scale-relative closure detection should preserve a tiny complete revolution");
 
     return 0;
 }

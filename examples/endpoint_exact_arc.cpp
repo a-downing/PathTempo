@@ -7,6 +7,9 @@
 
 namespace path_tempo::example {
     namespace {
+        constexpr double ARC_CLOSURE_ANGULAR_TOLERANCE = 1e-12;
+        constexpr double ARC_CLOSURE_RADIAL_RELATIVE_TOLERANCE = 1e-12;
+
         double dot(const Vector3 &left, const Vector3 &right) {
             return std::inner_product(left.begin(), left.end(), right.begin(), 0.0);
         }
@@ -192,7 +195,10 @@ namespace path_tempo::example {
         if (result.m_sweep < 0.0) {
             result.m_sweep += 2.0 * std::numbers::pi;
         }
-        if (magnitude(subtract(result.m_startArm, result.m_endArm)) < 1e-9) {
+        const auto angularSeparation = magnitude(subtract(startUnit, endUnit));
+        const auto radialTolerance = ARC_CLOSURE_RADIAL_RELATIVE_TOLERANCE * std::max(startRadius, endRadius);
+
+        if (angularSeparation <= ARC_CLOSURE_ANGULAR_TOLERANCE && std::abs(startRadius - endRadius) <= radialTolerance) {
             result.m_sweep = 2.0 * std::numbers::pi;
         }
         if (result.m_sweep <= 0.0) {

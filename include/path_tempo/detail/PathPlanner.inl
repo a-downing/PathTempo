@@ -21,9 +21,12 @@ namespace path_tempo {
         // Adjacent samples may differ by ordinary normalization noise, but a
         // larger tangent change represents a real C1 discontinuity.
         inline constexpr double TANGENT_CONTINUITY_TOLERANCE = 1e-9;
-        // Curvature is a numerically derived second derivative, so its C2 check
-        // is intentionally one order looser than the tangent check.
-        inline constexpr double CURVATURE_CONTINUITY_TOLERANCE = 1e-8;
+        // Scale the near-zero floor by local path length so it has curvature
+        // units and remains invariant when the same geometry changes units.
+        inline constexpr double CURVATURE_CONTINUITY_SCALED_ABSOLUTE_TOLERANCE = 1e-9;
+        // Curvature is numerically derived, so allow modest relative roundoff
+        // without masking a meaningful jump at small nonzero curvature.
+        inline constexpr double CURVATURE_CONTINUITY_RELATIVE_TOLERANCE = 1e-8;
     }
 
     template<std::size_t DoF>
@@ -203,13 +206,19 @@ namespace path_tempo {
                         });
                     }
 
-                    if (std::abs(previous.curvature[axis] - current.curvature[axis]) > detail::CURVATURE_CONTINUITY_TOLERANCE) {
+                    const auto curvatureDifference = std::abs(previous.curvature[axis] - current.curvature[axis]);
+                    const auto curvatureMagnitude = std::max(std::abs(previous.curvature[axis]), std::abs(current.curvature[axis]));
+                    const auto lengthScale = std::max(request.pieces[pieceIndex - 1].length, piece.length);
+                    const auto curvatureTolerance = detail::CURVATURE_CONTINUITY_SCALED_ABSOLUTE_TOLERANCE / lengthScale
+                        + detail::CURVATURE_CONTINUITY_RELATIVE_TOLERANCE * curvatureMagnitude;
+
+                    if (curvatureDifference > curvatureTolerance) {
                         return std::unexpected(PlanningError {
                             .code = PlanningErrorCode::InvalidInput,
                             .message = std::format(
                                 "path pieces {} and {} are not curvature-continuous on axis {}: previous={} current={} difference={} tolerance={}",
                                 pieceIndex - 1, pieceIndex, axis, previous.curvature[axis], current.curvature[axis],
-                                std::abs(previous.curvature[axis] - current.curvature[axis]), detail::CURVATURE_CONTINUITY_TOLERANCE),
+                                curvatureDifference, curvatureTolerance),
                         });
                     }
                 }
@@ -224,6 +233,6 @@ namespace path_tempo {
             .coordinateJerk = {request.limits.coordinateJerk.begin(), request.limits.coordinateJerk.end()},
         };
 
-        return solveLocal(localPieces, pieceIndices, request.beginning, request.ending, coupledLimits, request.settings, materializationCorrection);
+        return solveLocal(std::move(localPieces), pieceIndices, request.beginning, request.ending, coupledLimits, request.settings, materializationCorrection);
     }
 }

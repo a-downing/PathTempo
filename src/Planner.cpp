@@ -807,12 +807,18 @@ namespace path_tempo {
 
     PathPlanner &PathPlanner::operator=(PathPlanner &&) noexcept = default;
 
-    std::expected<PlannedPath, PlanningError> PathPlanner::solveLocal(const std::span<const LocalPiece> pieces, const PieceIndexMap &pieceIndices, const BoundaryState beginning, const BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection) {
-        auto correctedPieces = std::vector<bool>(pieces.size(), false);
-        auto localPieces = std::vector<LocalPiece>(pieces.begin(), pieces.end());
+    std::expected<PlannedPath, PlanningError> PathPlanner::solveLocal(std::vector<LocalPiece> localPieces, const PieceIndexMap &pieceIndices, const BoundaryState beginning, const BoundaryState ending, const CoupledLimits &limits, const PathPlanningSettings &settings, const MaterializationCorrection &materializationCorrection) {
+        auto correctedPieces = std::vector<bool>(localPieces.size(), false);
+        std::vector<double> initialMaximumVelocities;
+        initialMaximumVelocities.reserve(localPieces.size());
+
+        for (const auto &piece : localPieces) {
+            initialMaximumVelocities.push_back(piece.maximumVelocity);
+        }
+
         auto appliedSampledCorrection = false;
         auto appliedMaterializationCorrection = false;
-        const auto stationCount = pieces.size() + 1;
+        const auto stationCount = localPieces.size() + 1;
         const auto correctionDescription = [&] {
             if (appliedSampledCorrection && appliedMaterializationCorrection) {
                 return "sampled coupled-path and materialization corrections";
@@ -917,7 +923,7 @@ namespace path_tempo {
             }
 
             std::vector<SeedPiece> seedPieces;
-            seedPieces.reserve(pieces.size());
+            seedPieces.reserve(localPieces.size());
 
             for (const auto &piece : localPieces) {
                 seedPieces.push_back({piece.length, piece.maximumVelocity, piece.maximumAcceleration, piece.maximumJerk});
@@ -937,9 +943,9 @@ namespace path_tempo {
                 baselineBoundaryStates[station] = {.velocity = (*floor)[station]};
             }
 
-            std::vector<ScalarTransition> baselineTransitions(pieces.size());
+            std::vector<ScalarTransition> baselineTransitions(localPieces.size());
 
-            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+            for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                 const auto &piece = localPieces[pieceIndex];
                 const auto transition = m_implementation->transitionPlanner.solve({
                     .piece = piece.id,
@@ -961,11 +967,11 @@ namespace path_tempo {
                 baselineTransitions[pieceIndex] = *transition;
             }
 
-            std::vector<double> baselineCorrections(pieces.size(), 1.0);
+            std::vector<double> baselineCorrections(localPieces.size(), 1.0);
             auto maximumBaselineCorrection = 1.0;
 
             if (settings.applySampledCorrections) {
-                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                     const auto sampledCorrection = coupledTimeScale(localPieces[pieceIndex], baselineTransitions[pieceIndex]);
 
                     if (!sampledCorrection) {
@@ -980,7 +986,7 @@ namespace path_tempo {
             if (maximumBaselineCorrection > 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
                 appliedSampledCorrection = true;
 
-                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                     if (baselineCorrections[pieceIndex] <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
                         continue;
                     }
@@ -998,7 +1004,7 @@ namespace path_tempo {
             PlannedPath result;
             result.timeLaw.beginning = beginning;
             result.timeLaw.ending = ending;
-            result.pieceLimits.reserve(pieces.size());
+            result.pieceLimits.reserve(localPieces.size());
             result.diagnostics.correctionPasses = correctionPass + 1;
             auto boundaryStates = baselineBoundaryStates;
             auto transitions = baselineTransitions;
@@ -1078,7 +1084,7 @@ namespace path_tempo {
                     return true;
                 };
 
-                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                     if (!solvePiece(pieceIndex)) {
                         failed.push_back(pieceIndex);
                     } else if (settings.applySampledCorrections && !coupledFeasible(localPieces[pieceIndex], transitions[pieceIndex])) {
@@ -1094,7 +1100,7 @@ namespace path_tempo {
                 // affected boundary moves halfway toward the conservative profile;
                 // exact transition solves decide feasibility at every step. The
                 // zero weight is the original zero-acceleration construction.
-                const auto maximumRepairRounds = 2 * pieces.size() + BOUNDARY_REPAIR_EXTRA_ROUNDS;
+                const auto maximumRepairRounds = 2 * localPieces.size() + BOUNDARY_REPAIR_EXTRA_ROUNDS;
 
                 for (std::size_t repairRound = 0; !failed.empty(); ++repairRound) {
                     if (repairRound == maximumRepairRounds) {
@@ -1106,13 +1112,13 @@ namespace path_tempo {
                     }
 
                     std::vector<char> reduceBoundary(stationCount, false);
-                    std::vector<char> dirty(pieces.size(), false);
+                    std::vector<char> dirty(localPieces.size(), false);
 
                     for (const auto pieceIndex : failed) {
                         dirty[pieceIndex] = true;
 
                         for (const auto station : {pieceIndex, pieceIndex + 1}) {
-                            if (station > 0 && station < pieces.size() && boundaryWeights[station] > 0.0) {
+                            if (station > 0 && station < localPieces.size() && boundaryWeights[station] > 0.0) {
                                 reduceBoundary[station] = true;
                             }
                         }
@@ -1143,7 +1149,7 @@ namespace path_tempo {
 
                     std::vector<std::size_t> stillFailing;
 
-                    for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+                    for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                         if (!dirty[pieceIndex]) {
                             continue;
                         }
@@ -1403,12 +1409,12 @@ namespace path_tempo {
                 });
             }
 
-            std::vector<double> corrections(pieces.size(), 1.0);
+            std::vector<double> corrections(localPieces.size(), 1.0);
             auto maximumCorrection = 1.0;
 
             auto refinedPathDistance = 0.0;
 
-            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+            for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                 result.diagnostics.trajectoryDuration += transitions[pieceIndex].duration();
 
                 for (auto segment : transitions[pieceIndex]) {
@@ -1416,7 +1422,7 @@ namespace path_tempo {
                     result.timeLaw.segments.push_back(segment);
                 }
 
-                refinedPathDistance += pieces[pieceIndex].length;
+                refinedPathDistance += localPieces[pieceIndex].length;
             }
 
             if (materializationCorrection) {
@@ -1429,7 +1435,7 @@ namespace path_tempo {
                     });
                 }
 
-                std::vector<bool> supplied(pieces.size(), false);
+                std::vector<bool> supplied(localPieces.size(), false);
 
                 for (const auto &correction : *requested) {
                     const auto found = pieceIndices.find(correction.piece);
@@ -1459,8 +1465,8 @@ namespace path_tempo {
             if (maximumCorrection <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
                 result.diagnostics.correctedPieces = std::ranges::count(correctedPieces, true);
 
-                for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
-                    result.diagnostics.maximumAppliedTimeScale = std::max(result.diagnostics.maximumAppliedTimeScale, pieces[pieceIndex].maximumVelocity / localPieces[pieceIndex].maximumVelocity);
+                for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
+                    result.diagnostics.maximumAppliedTimeScale = std::max(result.diagnostics.maximumAppliedTimeScale, initialMaximumVelocities[pieceIndex] / localPieces[pieceIndex].maximumVelocity);
                 }
 
                 return result;
@@ -1468,7 +1474,7 @@ namespace path_tempo {
 
             appliedMaterializationCorrection = true;
 
-            for (std::size_t pieceIndex = 0; pieceIndex < pieces.size(); ++pieceIndex) {
+            for (std::size_t pieceIndex = 0; pieceIndex < localPieces.size(); ++pieceIndex) {
                 if (corrections[pieceIndex] <= 1.0 + CORRECTION_SIGNIFICANCE_TOLERANCE) {
                     continue;
                 }
