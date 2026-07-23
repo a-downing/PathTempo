@@ -13,6 +13,8 @@
 #include "path_tempo/Types.h"
 #include "path_tempo/Version.h"
 
+#include "../src/BoundaryRefinement.h"
+
 namespace {
     // Closed-form line and transition inputs should agree to near machine
     // precision; this allowance covers only ordinary arithmetic roundoff.
@@ -755,6 +757,28 @@ namespace {
             "nonzero acceleration across artificial boundaries should improve on the zero-acceleration profile");
     }
 
+    void testBoundaryAccelerationCandidatePreference() {
+        constexpr double durationResolution = 1e-6;
+        constexpr double microDuration = 0.023501909228039557;
+        constexpr double zeroDuration = 0.023501909657201489;
+
+        require(path_tempo::detail::preferBoundaryAccelerationCandidate(
+            zeroDuration, 0.0, microDuration, 1.741278423776903e-6, durationResolution),
+            "duration-equivalent zero acceleration should replace a micro-acceleration state");
+        require(path_tempo::detail::preferBoundaryAccelerationCandidate(
+            microDuration - 2.0 * durationResolution, 0.25, microDuration, 0.0, durationResolution),
+            "a meaningfully faster nonzero acceleration should remain preferable");
+        require(!path_tempo::detail::preferBoundaryAccelerationCandidate(
+            microDuration + 2.0 * durationResolution, 0.0, microDuration, 0.25, durationResolution),
+            "a meaningfully slower zero acceleration should not replace a useful nonzero state");
+        require(path_tempo::detail::resolveBoundaryRepairWeight(
+            1.0309278350515464e-6, 2.0624815246445016, 95.95, durationResolution) == 0.0,
+            "a repaired boundary weight that creates only a nano-phase should collapse to the zero-state baseline");
+        require(path_tempo::detail::resolveBoundaryRepairWeight(
+            0.1, 2.0624815246445016, 95.95, durationResolution) == 0.1,
+            "a boundary weight with a resolvable acceleration ramp should be retained");
+    }
+
     void testMultiPiecePathRejectsTangentDiscontinuity() {
         const auto first = path_tempo::sampleLine(path_tempo::Line<3> {
             .from = {0.0, 0.0, 0.0},
@@ -1060,6 +1084,112 @@ namespace {
         require(std::abs(coupledJerk) <= maximumJerk * (1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE), "the corrected endpoint should satisfy its coupled jerk limit");
     }
 
+    void testShortJerkPhaseUsesBracketingDifferentialStations() {
+        constexpr double length = 0.009551481852077569;
+        constexpr double velocity = 0.35;
+        constexpr double pathJerk = 101.0;
+        const std::array stations {
+            path_tempo::DifferentialStation<2> {
+                .distance = 0.0,
+                .tangent = {1.0, 0.0},
+                .thirdDerivative = {0.0, 221.07195407750322},
+            },
+            path_tempo::DifferentialStation<2> {
+                .distance = 0.008954514236322719,
+                .tangent = {1.0, 0.0},
+                .thirdDerivative = {0.0, 1205.7670652463494},
+            },
+            path_tempo::DifferentialStation<2> {
+                .distance = length,
+                .tangent = {1.0, 0.0},
+                .thirdDerivative = {0.0, 221.07195407750322},
+            },
+        };
+        const std::array pieces {
+            path_tempo::PathPiece<2> {
+                .id = 71,
+                .length = length,
+                .maxVelocity = 0.5,
+                .initialLimits = {
+                    .velocity = 0.5,
+                    .acceleration = 4.845,
+                    .jerk = 95.95,
+                },
+                .stations = stations,
+            },
+        };
+        auto request = path_tempo::PathPlanningRequest<2> {
+            .pieces = pieces,
+            .beginning = {.velocity = velocity},
+            .ending = {.velocity = velocity, .acceleration = 0.03196919167034261},
+            .limits = {
+                .pathAcceleration = 5.1,
+                .pathJerk = pathJerk,
+                .coordinateVelocity = {10.0, 10.0},
+                .coordinateAcceleration = {10.0, 10.0},
+                .coordinateJerk = {pathJerk, pathJerk},
+            },
+            .settings = {
+                .maximumCorrectionPasses = 32,
+                .applySampledCorrections = true,
+                .boundaryAccelerationMode = path_tempo::BoundaryAccelerationMode::Optimized,
+            },
+        };
+        auto callbackCalls = std::size_t {0};
+        const auto correction = [&](const path_tempo::PlannedPath &candidate)
+                -> std::expected<std::vector<path_tempo::PieceCorrection>, std::string> {
+            ++callbackCalls;
+            auto required = 1.0;
+
+            for (const auto &segment : candidate.timeLaw.segments) {
+                for (const auto time : std::array {0.0, segment.duration}) {
+                    const auto distance = std::clamp(segment.position(time), 0.0, length);
+                    const auto upper = std::ranges::lower_bound(stations, distance, {},
+                        &path_tempo::DifferentialStation<2>::distance);
+                    const auto check = [&](const auto &station) {
+                        const auto scalarVelocity = segment.velocity(time);
+                        const auto geometricJerk = station.thirdDerivative[1]
+                            * scalarVelocity * scalarVelocity * scalarVelocity;
+                        const auto coupledJerk = std::hypot(segment.jerk(), geometricJerk);
+                        required = std::max(required, std::cbrt(coupledJerk / pathJerk));
+                    };
+
+                    if (upper == stations.begin()) {
+                        check(*upper);
+                    } else if (upper == stations.end()) {
+                        check(stations.back());
+                    } else {
+                        check(*std::prev(upper));
+                        check(*upper);
+                    }
+                }
+            }
+
+            if (required > 1.0 + SAMPLED_LIMIT_RELATIVE_TOLERANCE) {
+                return std::vector {path_tempo::PieceCorrection {
+                    .piece = 71,
+                    .requiredTimeScale = required * 1.01,
+                }};
+            }
+
+            return std::vector<path_tempo::PieceCorrection> {};
+        };
+        request.settings.applySampledCorrections = false;
+        path_tempo::PathPlanner materializationOnlyPlanner;
+        const auto materializationOnly = materializationOnlyPlanner.solve(request, correction);
+
+        require(materializationOnly.has_value(), "materialization should correct an otherwise missed short jerk phase");
+        require(callbackCalls > 1, "station-only checking should leave the short jerk phase for materialization");
+
+        request.settings.applySampledCorrections = true;
+        callbackCalls = 0;
+        path_tempo::PathPlanner planner;
+        const auto planned = planner.solve(request, correction);
+
+        require(planned.has_value(), "a short jerk phase between differential stations should solve");
+        require(callbackCalls == 1, "sampled checking should catch a short jerk phase before materialization");
+    }
+
     void testCurvedBoundaryRejectsGeometricJerkViolation() {
         const auto curve = sampledQuarterCircle(61, 2.0);
         const std::array pieces {curve.view()};
@@ -1331,11 +1461,13 @@ int main() {
     testPathInputValidation();
     testMultiPiecePathPlanning();
     testMultiPiecePathUsesNonzeroBoundaryAcceleration();
+    testBoundaryAccelerationCandidatePreference();
     testMultiPiecePathRejectsTangentDiscontinuity();
     testCurvatureContinuityUsesGeometricScale();
     testCurvedPathPlanning();
     testCoupledStationsAtTransitionBoundaries();
     testAcceptedTransitionEndpointChecksCoupledStation();
+    testShortJerkPhaseUsesBracketingDifferentialStations();
     testCurvedBoundaryRejectsGeometricJerkViolation();
     testTinyNonzeroGeometryConstrainsBoundaryVelocity();
     testMultiPieceCurvedPlanning();

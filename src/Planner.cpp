@@ -1,5 +1,7 @@
 #include "path_tempo/Planner.h"
 
+#include "BoundaryRefinement.h"
+
 #include <algorithm>
 #include <cassert>
 #include <cmath>
@@ -82,7 +84,10 @@ namespace path_tempo {
         constexpr double BOUNDARY_REFINEMENT_DURATION_TOLERANCE = 1e-12;
         constexpr double BOUNDARY_REFINEMENT_CONVERGENCE_TOLERANCE = 1e-2;
         constexpr std::size_t BOUNDARY_STATE_REFINEMENT_MAXIMUM_SWEEPS = 12;
-        constexpr double BOUNDARY_STATE_REFINEMENT_CONVERGENCE_TOLERANCE = 1e-6;
+        // Acceleration candidates inside this duration resolution are
+        // equivalent. Prefer the smaller acceleration so insignificant timing
+        // gains cannot introduce full-jerk micro-phases.
+        constexpr double BOUNDARY_STATE_REFINEMENT_DURATION_RESOLUTION = 1e-6;
 
         double transitionDistanceTolerance(const double length) {
             return std::max(TRANSITION_ABSOLUTE_TOLERANCE, length * TRANSITION_DISTANCE_RELATIVE_TOLERANCE);
@@ -856,6 +861,25 @@ namespace path_tempo {
                     required = std::max(required, std::pow(measured / limit, exponent));
                 }
             };
+            const auto checkState = [&](const LocalPiece::Station &station, const double velocity,
+                                        const double acceleration, const double jerk) {
+                auto accelerationSquared = 0.0;
+                auto jerkSquared = 0.0;
+
+                for (std::size_t axis = 0; axis < station.tangent.size(); ++axis) {
+                    const auto coordinateVelocity = station.tangent[axis] * velocity;
+                    const auto coordinateAcceleration = station.tangent[axis] * acceleration + station.curvature[axis] * velocity * velocity;
+                    const auto coordinateJerk = station.tangent[axis] * jerk + 3.0 * station.curvature[axis] * velocity * acceleration + station.thirdDerivative[axis] * velocity * velocity * velocity;
+                    accelerationSquared += coordinateAcceleration * coordinateAcceleration;
+                    jerkSquared += coordinateJerk * coordinateJerk;
+                    consider(std::abs(coordinateVelocity), limits.coordinateVelocity[axis], 1.0);
+                    consider(std::abs(coordinateAcceleration), limits.coordinateAcceleration[axis], 0.5);
+                    consider(std::abs(coordinateJerk), limits.coordinateJerk[axis], 1.0 / 3.0);
+                }
+
+                consider(std::sqrt(accelerationSquared), limits.pathAcceleration, 0.5);
+                consider(std::sqrt(jerkSquared), limits.pathJerk, 1.0 / 3.0);
+            };
 
             auto firstSegment = std::size_t {0};
 
@@ -884,22 +908,7 @@ namespace path_tempo {
                     const auto velocity = std::max(0.0, segment.velocity(time));
                     const auto acceleration = segment.acceleration(time);
                     const auto jerk = segment.jerk();
-                    auto accelerationSquared = 0.0;
-                    auto jerkSquared = 0.0;
-
-                    for (std::size_t axis = 0; axis < station.tangent.size(); ++axis) {
-                        const auto coordinateVelocity = station.tangent[axis] * velocity;
-                        const auto coordinateAcceleration = station.tangent[axis] * acceleration + station.curvature[axis] * velocity * velocity;
-                        const auto coordinateJerk = station.tangent[axis] * jerk + 3.0 * station.curvature[axis] * velocity * acceleration + station.thirdDerivative[axis] * velocity * velocity * velocity;
-                        accelerationSquared += coordinateAcceleration * coordinateAcceleration;
-                        jerkSquared += coordinateJerk * coordinateJerk;
-                        consider(std::abs(coordinateVelocity), limits.coordinateVelocity[axis], 1.0);
-                        consider(std::abs(coordinateAcceleration), limits.coordinateAcceleration[axis], 0.5);
-                        consider(std::abs(coordinateJerk), limits.coordinateJerk[axis], 1.0 / 3.0);
-                    }
-
-                    consider(std::sqrt(accelerationSquared), limits.pathAcceleration, 0.5);
-                    consider(std::sqrt(jerkSquared), limits.pathJerk, 1.0 / 3.0);
+                    checkState(station, velocity, acceleration, jerk);
                 }
 
                 if (!visited) {
@@ -907,6 +916,37 @@ namespace path_tempo {
                         .code = PlanningErrorCode::SolverFailure,
                         .message = std::format("scalar transition for piece {} does not cover differential station {} at distance {}", piece.id, stationIndex, station.distance),
                     });
+                }
+            }
+
+            // A short scalar jerk phase can lie completely between adjacent
+            // differential stations. Check both bracketing geometries with
+            // each phase's endpoint state so a discontinuous jerk change is
+            // not invisible merely because the phase contains no station.
+            for (const auto &segment : transition) {
+                for (const auto time : std::array {0.0, segment.duration}) {
+                    const auto distance = std::clamp(segment.position(time), 0.0, piece.length);
+                    const auto upper = std::ranges::lower_bound(piece.stations, distance, {}, &LocalPiece::Station::distance);
+                    const auto velocity = std::max(0.0, segment.velocity(time));
+                    const auto acceleration = segment.acceleration(time);
+                    const auto jerk = segment.jerk();
+
+                    if (upper != piece.stations.end() && std::abs(upper->distance - distance) <= tolerance) {
+                        checkState(*upper, velocity, acceleration, jerk);
+                    } else {
+                        const auto lower = upper == piece.stations.begin() ? upper : std::prev(upper);
+
+                        if (lower != piece.stations.end() && std::abs(lower->distance - distance) <= tolerance) {
+                            checkState(*lower, velocity, acceleration, jerk);
+                        } else if (upper == piece.stations.begin()) {
+                            checkState(*upper, velocity, acceleration, jerk);
+                        } else if (upper == piece.stations.end()) {
+                            checkState(piece.stations.back(), velocity, acceleration, jerk);
+                        } else {
+                            checkState(*lower, velocity, acceleration, jerk);
+                            checkState(*upper, velocity, acceleration, jerk);
+                        }
+                    }
                 }
             }
 
@@ -1080,9 +1120,12 @@ namespace path_tempo {
                 const auto setBoundaryWeight = [&](const std::size_t station, const double weight) {
                     const auto floorSquared = (*floor)[station] * (*floor)[station];
                     const auto proposedSquared = proposedBoundaryStates[station].velocity * proposedBoundaryStates[station].velocity;
-                    boundaryWeights[station] = weight;
-                    boundaryStates[station].velocity = std::sqrt(std::lerp(floorSquared, proposedSquared, weight));
-                    boundaryStates[station].acceleration = proposedBoundaryStates[station].acceleration * weight;
+                    const auto maximumJerk = std::min(seedPieces[station - 1].maximumJerk, seedPieces[station].maximumJerk);
+                    const auto resolvedWeight = detail::resolveBoundaryRepairWeight(weight,
+                        proposedBoundaryStates[station].acceleration, maximumJerk, BOUNDARY_STATE_REFINEMENT_DURATION_RESOLUTION);
+                    boundaryWeights[station] = resolvedWeight;
+                    boundaryStates[station].velocity = std::sqrt(std::lerp(floorSquared, proposedSquared, resolvedWeight));
+                    boundaryStates[station].acceleration = proposedBoundaryStates[station].acceleration * resolvedWeight;
                 };
 
                 std::vector<std::size_t> failed;
@@ -1229,7 +1272,7 @@ namespace path_tempo {
                         const auto duration = transitions[leftPiece].duration() + transitions[rightPiece].duration();
 
                         if (duration + BOUNDARY_REFINEMENT_DURATION_TOLERANCE < bestDuration) {
-                            bestWeight = trialWeight;
+                            bestWeight = boundaryWeights[station];
                             bestState = boundaryStates[station];
                             bestLeft = transitions[leftPiece];
                             bestRight = transitions[rightPiece];
@@ -1315,7 +1358,8 @@ namespace path_tempo {
 
                         const auto duration = transitions[leftPiece].duration() + transitions[rightPiece].duration();
 
-                        if (duration + BOUNDARY_REFINEMENT_DURATION_TOLERANCE < bestDuration) {
+                        if (detail::preferBoundaryAccelerationCandidate(duration, acceleration, bestDuration,
+                                bestState.acceleration, BOUNDARY_STATE_REFINEMENT_DURATION_RESOLUTION)) {
                             bestState = boundaryStates[station];
                             bestLeft = transitions[leftPiece];
                             bestRight = transitions[rightPiece];
@@ -1327,7 +1371,7 @@ namespace path_tempo {
                     transitions[leftPiece] = bestLeft;
                     transitions[rightPiece] = bestRight;
 
-                    return originalLeft.duration() + originalRight.duration() - bestDuration;
+                    return std::max(0.0, originalLeft.duration() + originalRight.duration() - bestDuration);
                 };
 
                 const auto refineVelocity = [&](const std::size_t station) -> double {
@@ -1397,7 +1441,7 @@ namespace path_tempo {
                             refineState(station);
                         }
 
-                        if (stateCycleImprovement <= BOUNDARY_STATE_REFINEMENT_CONVERGENCE_TOLERANCE) {
+                        if (stateCycleImprovement <= BOUNDARY_STATE_REFINEMENT_DURATION_RESOLUTION) {
                             break;
                         }
 

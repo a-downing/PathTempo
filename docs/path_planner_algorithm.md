@@ -95,6 +95,7 @@ The following values are part of the specified behavior:
 | Duration comparison tolerance | `1e-12` | Required local improvement margin |
 | Joint sweep convergence | `1e-2` | Duration improvement over a forward/backward pair |
 | Independent sweep convergence | `1e-6` | Duration improvement over a forward/backward pair |
+| Acceleration duration resolution | `1e-6` | Micro-phase canonicalization and acceleration-candidate equivalence |
 | Coupled correction significance | `1e-9` | Ignores insignificant time scales |
 | Coupled correction safety factor | `1.01` | Moves a corrected baseline inside the feasible region |
 | Constraint-station Newton steps | `12` | Accelerates scalar position inversion |
@@ -151,6 +152,8 @@ cap[i] = min(V[i-1], V[i])        for 0 < i < n
 ## Complete coupled-constraint check
 
 Given a materialized transition for one piece, evaluate every supplied differential constraint station. Find every constant-jerk phase whose position interval contains the station, using the same `max(1e-12, 1e-9 * pieceLength)` tolerance that validates the scalar transition endpoint. Evaluating every containing phase intentionally evaluates both sides when a station coincides with a phase boundary. Fail with a solver error if any station matches no phase.
+
+Also evaluate the beginning and end state of every constant-jerk phase against both differential stations bracketing the phase endpoint's path position. At the first or last station, evaluate only that available station. Use the phase's own scalar jerk on both endpoints, so the two phases sharing a boundary are checked independently. Do not interpolate a synthetic differential state between the brackets. This check detects short scalar phases that contain no differential station, but it remains a discrete sampled constraint rather than proof of continuous geometry between stations.
 
 If every station has exactly zero curvature and exactly zero third derivative, the scalar caps already imply every coordinate and aggregate constraint. Skip the coupled station-time evaluation for that piece. Any nonzero curvature or third derivative, including a value below the tangent-component tolerance, requires the coupled station-time evaluation.
 
@@ -430,6 +433,14 @@ velocity(x) = sqrt(lerp(floorVelocity^2, proposedVelocity^2, x))
 acceleration(x) = proposedAcceleration * x
 ```
 
+For a repair weight below `1`, calculate the shortest full-jerk ramp associated with its absolute acceleration:
+
+```text
+rampDuration = abs(acceleration(x)) / min(J[i-1], J[i])
+```
+
+If `rampDuration <= 1e-6`, replace the weight with zero. This moves the complete boundary state to the known-feasible conservative endpoint of the homotopy instead of retaining a full-jerk micro-phase. Subsequent repair rounds propagate that change to neighboring boundaries when necessary.
+
 Materialize all pieces and mark a piece failed if:
 
 - the local transition solver fails, or
@@ -484,7 +495,7 @@ clamp(currentAcceleration - sharedA / 4, -sharedA, sharedA)
 clamp(currentAcceleration + sharedA / 4, -sharedA, sharedA)
 ```
 
-Retain the feasible candidate with the lowest adjacent-piece duration, subject to the `1e-12` improvement margin.
+Treat candidate durations within `1e-6` as equivalent and prefer the candidate with smaller absolute acceleration. Outside that resolution, retain a candidate only when it is faster by more than `1e-6`. This deliberately allows a bounded local duration increase to eliminate a numerically insignificant full-jerk phase. Clamp its reported sweep improvement to zero when the selected simpler candidate is slightly slower.
 
 ### Independent velocity refinement
 
@@ -586,7 +597,7 @@ A conforming implementation preserves these invariants:
 - Zero mode keeps every internal boundary acceleration at zero and skips all proposal refinement.
 - Every accepted piece is feasible according to the authoritative fixed-distance transition solver.
 - When sampled coupled checks are enabled, every accepted proposal transition passes them within `1e-9` relative time-scale significance.
-- Refinement commits only strict local duration reductions.
+- Joint and velocity refinement commit only strict local duration reductions. Acceleration refinement may instead select a smaller absolute acceleration within the `1e-6` duration resolution.
 - The final non-zero profile is used only if it is strictly faster than the conservative profile.
 - Corrections affect only the owning pieces and restart the complete boundary-state solve.
 - Differential stations constrain only the supplied samples; they do not prove continuous geometric feasibility between samples.
